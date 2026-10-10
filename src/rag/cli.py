@@ -1,8 +1,9 @@
-"""`rag` command line: sync, index, search, eval, serve."""
+"""`rag` command line: sync, index, search, ask, bench, eval, serve."""
 
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 
 import typer
 
@@ -57,7 +58,8 @@ def search(
     searcher = Searcher(Embedder(model))
     hits = searcher.search(query, k=k, mode=mode, product=product, rerank=rerank)
     for i, page in enumerate(hits, 1):
-        typer.secho(f"{i}. {page.title}  [{page.score:.3f}]", bold=True)
+        low = "  (low relevance)" if page.low_relevance else ""
+        typer.secho(f"{i}. {page.title}  [{page.score:.3f}]{low}", bold=not page.low_relevance, dim=page.low_relevance)
         typer.echo(f"   {' > '.join(page.breadcrumbs[1:]) or page.product} | {page.url}")
         for chunk in page.chunks:
             section = " > ".join(chunk.section_path) or "(page)"
@@ -66,6 +68,86 @@ def search(
                 typer.echo(textwrap.indent(textwrap.shorten(chunk.text, 400), "     "))
     if not hits:
         typer.echo("No results")
+
+
+@app.command()
+def ask(
+    query: str,
+    mode: str = typer.Option("hybrid", help="hybrid | vector | fts"),
+    product: str | None = typer.Option(None, help="Filter by product, e.g. 'Direct Print'"),
+    rerank: bool = typer.Option(True, help="Rerank and drop low-relevance sources"),
+    llm_model: str = typer.Option(config.LLM_MODEL, help="LLM id (default: the one loaded in LM Studio)"),
+) -> None:
+    """Answer a question with the local LLM, grounded in the search results."""
+    from rag.answer import stream_answer
+    from rag.llm import LLMClient
+    from rag.search import Searcher
+
+    hits = Searcher().search(query, k=config.LLM_CONTEXT_PAGES, mode=mode, product=product, rerank=rerank)
+    for event in stream_answer(query, hits, LLMClient(model=llm_model)):
+        if event["type"] == "delta":
+            typer.echo(event["text"], nl=False)
+        elif event["type"] == "error":
+            typer.secho(f"\nLLM error: {event['message']}", fg="red", err=True)
+            raise typer.Exit(1)
+        elif event["type"] == "done":
+            typer.echo()
+            if event["model"]:
+                typer.secho(f"\n[{event['model']}, {event['took_ms']} ms]", dim=True)
+        elif event["type"] == "sources" and event["sources"]:
+            for s in event["sources"]:
+                typer.secho(f"[{s['n']}] {s['title']}  {s['url']}", dim=True)
+            typer.echo()
+
+
+@app.command()
+def bench(
+    models: list[str] = typer.Argument(None, help="LLM ids to compare (default: the loaded one)"),
+    file: Path = typer.Option(config.BENCH_FILE, help="YAML list of questions"),
+    group: str | None = typer.Option(None, help="Only questions of this group, e.g. 'novice'"),
+    out: Path | None = typer.Option(None, help="Markdown report (default: data/bench/<time>.md)"),
+    mode: str = typer.Option("hybrid", help="hybrid | vector | fts"),
+    rerank: bool = typer.Option(True, help="Rerank and drop low-relevance sources"),
+) -> None:
+    """Compare LLMs on the same questions and sources: latency, tokens/s, answers side by side."""
+    from rag.bench import (
+        default_report_path, load_questions, render_report, retrieval_line, run_bench, summary_rows,
+    )
+    from rag.llm import LLMClient, LLMError
+    from rag.search import Searcher
+
+    if not file.exists():
+        typer.secho(f"No questions file {file}: cp eval/bench.example.yaml eval/bench.yaml", fg="red", err=True)
+        raise typer.Exit(1)
+    questions = load_questions(file, group)
+    if not questions:
+        typer.secho(f"No questions in {file}" + (f" for group '{group}'" if group else ""), fg="red", err=True)
+        raise typer.Exit(1)
+    llm = LLMClient()
+    try:
+        models = models or [llm.resolve_model()]
+    except LLMError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(1)
+
+    items = run_bench(Searcher(), llm, questions, models, mode=mode, rerank=rerank, log=typer.echo)
+
+    settings = (
+        f"Questions: {len(questions)} ({file.name}{f', group {group}' if group else ''}) · search: {mode}{' + rerank' if rerank else ''} · "
+        f"temperature {config.LLM_TEMPERATURE} · max_tokens {config.LLM_MAX_TOKENS} · "
+        f"reasoning {config.LLM_REASONING or 'default'}"
+    )
+    out = out or default_report_path()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_report(items, models, settings))
+
+    rows = summary_rows(items, models)
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    typer.echo()
+    for n, row in enumerate(rows):
+        typer.secho("  ".join(c.ljust(w) for c, w in zip(row, widths)), bold=n == 0)
+    typer.echo(retrieval_line(items))
+    typer.echo(f"\nReport with all answers: {out}")
 
 
 @app.command()

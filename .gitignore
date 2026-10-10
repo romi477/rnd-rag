@@ -15,6 +15,9 @@ _docs/
 # - golden set derived from internal docs (see eval/queries.example.yaml)
 eval/queries.yaml
 
+# - LLM bench questions (see eval/bench.example.yaml)
+eval/bench.yaml
+
 # Python / tooling
 .venv/
 __pycache__/

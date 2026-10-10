@@ -1,0 +1,20 @@
+# Questions for `rag bench` (the real eval/bench.yaml is git-ignored: it is derived from internal docs).
+#
+#   cp eval/bench.example.yaml eval/bench.yaml   # then put real questions
+#
+# Prefer hard questions: several steps, two parts, answers to derive rather than copy, or the way
+# a confused first-time user asks (vague, wrong terms, pasted errors).
+# Fields:
+#   q       question text (a plain string item works too)
+#   group   optional, run one group with `rag bench --group novice`
+#   expect  optional page ids that answer it; [] = the docs don't cover it (the LLM should say so)
+
+- q: how do I install the printer client and make it start automatically, step by step?
+  group: heavy
+  expect: ["123456789"]
+- q: just installed the connector and orders come in empty, what did i do wrong??
+  group: novice
+  expect: ["234567890"]
+- q: does the connector work with a marketplace you don't support?
+  group: novice
+  expect: []

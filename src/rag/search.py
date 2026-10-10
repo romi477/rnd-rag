@@ -27,6 +27,9 @@ class ChunkHit:
     section_path: list[str]
     text: str
     score: float
+    # How the chunk was scored, for debugging: {"vector"|"fts": {"rank", "score"}, "rrf",
+    # "retrieval_rank" (position before rerank), "rerank"}; only the keys that apply.
+    signals: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -40,6 +43,8 @@ class PageHit:
     labels: list[str]
     score: float
     chunks: list[ChunkHit] = field(default_factory=list)
+    # Set only after rerank: the best chunk scored below the relevance cut-off.
+    low_relevance: bool = False
 
 
 class Searcher:
@@ -74,7 +79,14 @@ class Searcher:
         candidates: int = 40,
         chunks_per_page: int = 3,
         fts_weight: float = config.HYBRID_FTS_WEIGHT,
+        rerank_candidates: int = config.RERANK_CANDIDATES,
+        min_score: float = config.RERANK_MIN_SCORE,
     ) -> list[PageHit]:
+        """Pages ranked by their best chunk.
+
+        With `rerank`, the top `rerank_candidates` chunks are re-scored by the cross-encoder
+        (0..1) and pages whose best chunk is below `min_score` are flagged `low_relevance`.
+        """
         query = query.strip()
         if not query:
             return []
@@ -82,12 +94,19 @@ class Searcher:
             rows = self.hybrid(query, product, candidates, fts_weight)
         else:
             rows = self.retrieve(query, mode, product, candidates)
+        for i, row in enumerate(rows, 1):
+            row["signals"]["retrieval_rank"] = i
         if rerank and rows:
+            rows = rows[:rerank_candidates]
             scores = self.reranker.score(query, [r["embed_text"] for r in rows])
             for row, score in zip(rows, scores, strict=True):
-                row["score"] = score
+                row["score"] = row["signals"]["rerank"] = score
             rows.sort(key=lambda r: r["score"], reverse=True)
-        return group_by_page(rows, k, chunks_per_page)
+        pages = group_by_page(rows, k, chunks_per_page)
+        if rerank:
+            for page in pages:
+                page.low_relevance = page.score < min_score
+        return pages
 
     def retrieve(
         self, query: str, mode: Literal["vector", "fts"], product: str | None, limit: int
@@ -102,8 +121,9 @@ class Searcher:
             q = q.where(f"product = {sql_str(product)}", prefilter=True)
         score_col = "_score" if mode == "fts" else "_distance"
         rows = q.select(COLUMNS + [score_col]).limit(limit).to_list()
-        for row in rows:
+        for rank, row in enumerate(rows, 1):
             row["score"] = row["_score"] if mode == "fts" else 1.0 - row["_distance"]
+            row["signals"] = {mode: {"rank": rank, "score": row["score"]}}
         return rows
 
     def hybrid(
@@ -115,9 +135,13 @@ class Searcher:
             if weight <= 0:
                 continue
             for rank, row in enumerate(self.retrieve(query, mode, product, limit), 1):
-                entry = fused.setdefault(row["chunk_id"], row | {"score": 0.0})
+                entry = fused.setdefault(row["chunk_id"], row | {"score": 0.0, "signals": {}})
+                entry["signals"].update(row["signals"])
                 entry["score"] += weight / (RRF_K + rank)
+        for entry in fused.values():
+            entry["signals"]["rrf"] = entry["score"]
         return sorted(fused.values(), key=lambda r: r["score"], reverse=True)[:limit]
+
 
 def group_by_page(rows: list[dict], k: int, chunks_per_page: int) -> list[PageHit]:
     """Rows must be sorted by score desc; a page's score is its best chunk's score."""
@@ -139,6 +163,6 @@ def group_by_page(rows: list[dict], k: int, chunks_per_page: int) -> list[PageHi
             )
         if len(page.chunks) < chunks_per_page:
             page.chunks.append(
-                ChunkHit(row["chunk_id"], row["section_path"], row["text"], row["score"])
+                ChunkHit(row["chunk_id"], row["section_path"], row["text"], row["score"], row["signals"])
             )
     return list(pages.values())

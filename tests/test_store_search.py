@@ -80,3 +80,35 @@ def test_product_filter(store):
     searcher = Searcher(FakeEmbedder(), store=store)
     hits = searcher.search("printer", k=5, mode="hybrid", product="ZPL Label Designer")
     assert [h.page_id for h in hits] == ["2"]
+
+
+class FakeReranker:
+    """Scores a chunk by the share of query words it contains (0..1)."""
+
+    def score(self, query, passages):
+        words = query.lower().split()
+        return [sum(w in p.lower() for w in words) / len(words) for p in passages]
+
+
+def test_rerank_flags_pages_below_cutoff(store):
+    searcher = Searcher(FakeEmbedder(), reranker=FakeReranker(), store=store)
+    hits = searcher.search("shopify invoice orders", k=3, rerank=True, min_score=0.5)
+    assert hits[0].page_id == "3" and not hits[0].low_relevance
+    assert all(h.low_relevance for h in hits[1:])
+    # without rerank nothing is flagged: hybrid scores carry no absolute meaning
+    assert not any(h.low_relevance for h in searcher.search("shopify invoice orders", k=3))
+
+
+def test_rerank_candidates_limit(store):
+    searcher = Searcher(FakeEmbedder(), reranker=FakeReranker(), store=store)
+    assert len(searcher.search("printer label shopify", k=10, rerank=True, rerank_candidates=1)) == 1
+
+
+def test_signals_explain_the_score(store):
+    searcher = Searcher(FakeEmbedder(), reranker=FakeReranker(), store=store)
+    best = searcher.search("shopify invoice", k=3, mode="hybrid", rerank=True)[0].chunks[0]
+    sig = best.signals
+    assert set(sig) == {"vector", "fts", "rrf", "retrieval_rank", "rerank"}
+    assert sig["vector"]["rank"] == 1 and sig["fts"]["rank"] == 1 and sig["retrieval_rank"] == 1
+    assert sig["rerank"] == best.score
+    assert set(searcher.search("shopify", k=1, mode="fts")[0].chunks[0].signals) == {"fts", "retrieval_rank"}
