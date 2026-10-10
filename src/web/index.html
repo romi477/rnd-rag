@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs Search</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+  <h1>Docs Search <span>· R&amp;D Products Documentation</span></h1>
+  <form id="form">
+    <div class="search-row">
+      <input id="q" type="search" placeholder="Ask about connectors, Direct Print, labels…  (press / to focus)" autocomplete="off" autofocus>
+      <button type="submit">Search</button>
+    </div>
+    <div class="filters">
+      <label>Product <select id="product"><option value="">All</option></select></label>
+      <label>Mode
+        <select id="mode">
+          <option value="hybrid">Hybrid</option>
+          <option value="vector">Semantic</option>
+          <option value="fts">Keyword</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="rerank"> Rerank (slower)</label>
+    </div>
+  </form>
+  <div id="status"></div>
+  <div id="results"></div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

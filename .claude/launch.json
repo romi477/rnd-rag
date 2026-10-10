@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "rag-ui",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "rag", "serve", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

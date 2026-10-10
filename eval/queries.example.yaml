@@ -1,0 +1,14 @@
+# Format of eval/queries.yaml (the real file is git-ignored: it is derived from internal docs).
+#
+#   cp eval/queries.example.yaml eval/queries.yaml   # then put real questions and page ids
+#
+# Fields:
+#   q         query text, phrased the way a user would ask (avoid copying page titles)
+#   relevant  Confluence page ids that answer it; a hit = any of them in the top-k
+#   note      optional comment (e.g. "error string", "paraphrase")
+
+- q: printer client stops working after Windows update
+  relevant: ["123456789"]
+- q: "HTTP 401 Unauthorized when saving the connection"
+  relevant: ["234567890", "345678901"]
+  note: error string, two pages answer it

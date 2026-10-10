@@ -1,0 +1,25 @@
+# Secrets / local config
+.env
+.claude/settings.local.json
+
+# Internal content: never commit (public repo)
+# - synced Confluence pages
+raw-data/
+
+# - LanceDB index (contains page text)
+data/
+
+# - internal planning notes and results
+_docs/
+
+# - golden set derived from internal docs (see eval/queries.example.yaml)
+eval/queries.yaml
+
+# Python / tooling
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# OS
+.DS_Store

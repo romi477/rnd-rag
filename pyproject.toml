@@ -1,0 +1,34 @@
+[project]
+name = "rnd-rag"
+version = "0.1.0"
+description = "Local hybrid search (and later RAG) over VentorTech Confluence documentation"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "lancedb>=0.25",
+    "markdownify>=0.13",
+    "pyarrow>=18",
+    "python-dotenv>=1.0",
+    "pyyaml>=6",
+    "sentence-transformers>=5.0",
+    "transformers>=4.51",
+    "typer>=0.15",
+    "uvicorn>=0.32",
+]
+
+[project.scripts]
+rag = "rag.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
