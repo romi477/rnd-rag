@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -47,6 +47,16 @@ app = FastAPI(title="rnd-rag", lifespan=lifespan, docs_url=None, redoc_url=None)
 # Only answer to requests addressed to this machine by name: a page on another site that rebinds
 # its DNS name to 127.0.0.1 would otherwise read the docs. Bind to another interface? Add its name.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.ALLOWED_HOSTS)
+
+
+@app.middleware("http")
+async def revalidate_ui(request: Request, call_next):
+    """The UI files have no build step to version them: make browsers check for a newer copy
+    (a cheap 304 via ETag) instead of mixing a cached app.js with a new index.html."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
 
 
 def run_search(

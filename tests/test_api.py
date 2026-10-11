@@ -85,3 +85,8 @@ def test_foreign_host_header_is_rejected(client):
 
 def test_no_docs_pages(client):
     assert client.get("/docs").status_code == 404 and client.get("/redoc").status_code == 404
+
+
+def test_ui_files_are_revalidated(client):
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assert "cache-control" not in client.get("/api/products").headers

@@ -3,6 +3,7 @@ const STOP = new Set(("a an and are as at be by can could do does did for from h
   "our should that the there this to was were what when where which why will with would you your").split(" "));
 const STORE_KEY = "rag.tabs.v1";
 const DEBUG_KEY = "rag.debug";
+const THEME_KEY = "rag.theme";
 
 // --- state --------------------------------------------------------------------
 // Each tab is an independent search: form values, last results and LLM answer.
@@ -244,6 +245,40 @@ function setDebug(on) {
   try { localStorage.setItem(DEBUG_KEY, on ? "1" : "0"); } catch { /* storage blocked */ }
   $("debug").setAttribute("aria-pressed", String(on));
   renderContent(activeTab());
+}
+
+// --- filter separators: no pipe before a filter that starts a wrapped row ---------------
+
+function markFilterRows() {
+  let prev = null;
+  for (const el of document.querySelector(".filters").children) {
+    // filters are centred vertically and differ in height: a new row starts below the previous one
+    el.classList.toggle("row-start", !prev || el.offsetTop >= prev.offsetTop + prev.offsetHeight);
+    prev = el;
+  }
+}
+
+// --- theme: follows the system until the button picks one (saved per browser) ------
+
+const systemDark = matchMedia("(prefers-color-scheme: dark)");
+
+function savedTheme() {
+  let theme = null;
+  try { theme = localStorage.getItem(THEME_KEY); } catch { /* storage blocked */ }
+  return theme === "light" || theme === "dark" ? theme : null;
+}
+
+function applyTheme(theme = savedTheme() || (systemDark.matches ? "dark" : "light")) {
+  document.documentElement.dataset.theme = theme;
+  const label = `Switch to ${theme === "dark" ? "light" : "dark"} theme`;
+  $("theme").title = label;
+  $("theme").setAttribute("aria-label", label);
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem(THEME_KEY, next); } catch { /* storage blocked: this page only */ }
+  applyTheme(next);
 }
 
 function card(p, ts, open, rank) {
@@ -555,6 +590,8 @@ async function run() {
 
 // --- LLM models ---------------------------------------------------------------
 
+const LLM_HELP = $("llm-label").title; // the hover help from index.html
+
 async function refreshLlmStatus() {
   const info = await fetch("/api/llm").then((r) => (r.ok ? r.json() : Promise.reject(r)))
     .catch(() => ({available: false, model: null, models: [], error: "backend not reachable"}));
@@ -564,9 +601,7 @@ async function refreshLlmStatus() {
     llmInfo.models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${m.loaded === false ? " (not loaded)" : ""}</option>`).join("");
   $("model").value = [...$("model").options].some((o) => o.value === selected) ? selected : "";
   $("llm").disabled = $("model").disabled = !llmInfo.available;
-  $("llm-label").title = llmInfo.available
-    ? "Models marked (not loaded) are loaded by LM Studio on first use, which takes a while"
-    : `LLM unavailable: ${llmInfo.error}`;
+  $("llm-label").title = llmInfo.available ? LLM_HELP : `${LLM_HELP}\n\nUnavailable now: ${llmInfo.error}`;
   if (activeTab()) updateSubmitLabel(activeTab());
 }
 
@@ -595,7 +630,9 @@ async function init() {
   const runNow = openFromUrl();
   if (!tabs.length) { tabs.push(newTab()); activeId = tabs[0].id; }
   $("debug").setAttribute("aria-pressed", String(debug));
+  applyTheme();
   renderView();
+  markFilterRows();
   refreshLlmStatus(); // LM Studio may be slow to answer: don't wait for it
   const list = await fetch("/api/products").then((r) => (r.ok ? r.json() : [])).catch(() => []);
   $("product").insertAdjacentHTML("beforeend", list.map((p) => `<option>${escapeHtml(p)}</option>`).join(""));
@@ -608,6 +645,14 @@ async function init() {
 $("form").addEventListener("submit", (e) => { e.preventDefault(); run(); });
 $("clear").addEventListener("click", clearResults);
 $("debug").addEventListener("click", () => setDebug(!debug));
+$("theme").addEventListener("click", toggleTheme);
+{ // the row breaks move when the window or a filter (e.g. the model list) changes width
+  const rows = new ResizeObserver(markFilterRows);
+  rows.observe(document.querySelector(".filters"));
+  for (const el of document.querySelector(".filters").children) rows.observe(el);
+}
+systemDark.addEventListener("change", () => { if (!savedTheme()) applyTheme(); });
+window.addEventListener("storage", (e) => { if (e.key === THEME_KEY) applyTheme(); });
 ["product", "mode", "rerank", "llm", "model"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
 $("tabs").addEventListener("click", (e) => {
   const close = e.target.closest("[data-close]");

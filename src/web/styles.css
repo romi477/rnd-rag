@@ -1,14 +1,23 @@
+/* Light by default; dark follows the system unless the theme button set data-theme on <html> */
 :root {
   --bg: #f7f7f5; --surface: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
   --border: #e3e2dd; --accent: #2f5bd3; --accent-soft: #e8eefc; --mark: #fff1a8;
-  --code-bg: #f2f1ed; --toggle-off: #c9c8c2;
+  --code-bg: #f2f1ed; --on-accent: #fff;
+  color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #161615; --surface: #1f1f1d; --text: #ecebe6; --muted: #9a9993;
     --border: #33332f; --accent: #8aa8ff; --accent-soft: #263152; --mark: #5c4f12;
-    --code-bg: #2a2a27; --toggle-off: #4a4a45;
+    --code-bg: #2a2a27; --on-accent: #10142a;
+    color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #161615; --surface: #1f1f1d; --text: #ecebe6; --muted: #9a9993;
+  --border: #33332f; --accent: #8aa8ff; --accent-soft: #263152; --mark: #5c4f12;
+  --code-bg: #2a2a27; --on-accent: #10142a;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 body {
@@ -16,7 +25,10 @@ body {
   font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
-h1 { font-size: 20px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.01em; }
+/* Title on the left, tool buttons (clear, debug, theme) on the right, above Find */
+header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+.tools { display: flex; gap: 2px; flex-shrink: 0; }
 h1 span { color: var(--muted); font-weight: 400; }
 /* Two columns: query + filters on the left, Search + clear on the right, so filters never pass under Search */
 form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
@@ -27,10 +39,9 @@ input[type=search] {
 }
 input[type=search]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 button {
-  padding: 0 14px; font-size: 14px; font-weight: 500; color: #fff; background: var(--accent);
+  padding: 0 14px; font-size: 14px; font-weight: 500; color: var(--on-accent); background: var(--accent);
   border: 0; border-radius: 8px; cursor: pointer;
 }
-@media (prefers-color-scheme: dark) { button { color: #10142a; } }
 .filters { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 14px; align-items: center; color: var(--muted); font-size: 13px; }
 select {
   font-size: 13px; padding: 4px 6px; color: var(--text); background: var(--surface);
@@ -105,18 +116,20 @@ a.cite:hover { background: var(--accent); color: var(--surface); }
   border-bottom: 1px solid var(--border); scrollbar-width: thin;
 }
 .tab {
-  display: flex; align-items: center; gap: 6px; flex: 0 0 auto; max-width: 260px;
-  padding: 2px 4px 2px 10px; font-size: 12.5px; line-height: 20px; color: var(--muted); cursor: pointer; user-select: none;
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-width: 128px; max-width: 280px;
+  position: relative; padding: 1px 24px; font-size: 12.5px; line-height: 20px; color: var(--muted); cursor: pointer; user-select: none;
   border: 1px solid transparent; border-bottom: none; border-radius: 8px 8px 0 0;
 }
 .tab:hover { color: var(--text); background: var(--surface); }
 .tab.active {
   color: var(--text); background: var(--surface); border-color: var(--border);
-  margin-bottom: -1px; padding-bottom: 3px;
+  margin-bottom: -1px; padding-bottom: 2px;
 }
-.tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The title is centred; the close button sits over the right padding, so it does not shift it */
+.tab-title { flex: 1; min-width: 0; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab-model { font-size: 11px; color: var(--accent); white-space: nowrap; }
 .tab-close {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
   padding: 0 4px; font-size: 14px; line-height: 16px; color: var(--muted);
   background: none; border-radius: 4px;
 }
@@ -132,6 +145,14 @@ a.cite:hover { background: var(--accent); color: var(--surface); }
 }
 .llm-group { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .filters label { white-space: nowrap; }
+/* A faint pipe between the filter sections (product | mode | rerank | LLM), centred in the gap.
+   It takes no space, so hiding it at the start of a wrapped row (.row-start, set in app.js) can't re-wrap. */
+.filters > * { position: relative; }
+.filters > * + *::before {
+  content: ""; position: absolute; left: -7.5px; top: 50%; width: 1px; height: 16px; margin-top: -8px;
+  background: var(--muted); opacity: .35;
+}
+.filters > .row-start::before { display: none; }
 #product { max-width: 160px; }
 #model { max-width: 180px; }
 .answer-model { text-transform: none; letter-spacing: 0; color: var(--accent); }
@@ -155,24 +176,11 @@ details.result:not([open]) { padding-top: 10px; padding-bottom: 10px; }
 .answer-panel { margin: 0; font-size: inherit; }
 .answer-panel:not([open]) > summary { margin-bottom: 0; }
 
-/* Checkboxes in the filter row look like toggle switches */
-.filters input[type=checkbox] {
-  appearance: none; -webkit-appearance: none; flex: 0 0 auto; position: relative; margin: 0;
-  width: 28px; height: 16px; border-radius: 8px; background: var(--toggle-off);
-  cursor: pointer; transition: background .15s;
-}
-.filters input[type=checkbox]::before {
-  content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
-  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .15s;
-}
-.filters input[type=checkbox]:checked { background: var(--accent); }
-.filters input[type=checkbox]:checked::before { transform: translateX(12px); }
-.filters input[type=checkbox]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Plain checkboxes in the filter row, in the accent colour */
+.filters input[type=checkbox] { flex: 0 0 auto; width: 14px; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .filters input[type=checkbox]:disabled { cursor: not-allowed; }
 .filters label:has(input[type=checkbox]:enabled) { cursor: pointer; }
 
-/* Clear-results icon under the Search button */
-.form-tools { justify-self: center; align-self: start; display: flex; gap: 2px; }
 .icon-btn {
   display: grid; place-items: center;
   width: 28px; height: 28px; padding: 0; color: var(--muted); background: none; border-radius: 6px;
@@ -180,6 +188,9 @@ details.result:not([open]) { padding-top: 10px; padding-bottom: 10px; }
 .icon-btn:hover { color: var(--text); background: var(--surface); }
 .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .icon-btn[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+/* Theme button: a half-filled circle that turns over in the dark theme */
+#theme svg { transition: transform .2s ease; }
+:root[data-theme="dark"] #theme svg { transform: rotate(180deg); }
 
 /* Rank badge on every card; answer sources get it filled, the other cards outlined */
 .rank-badge {
@@ -209,6 +220,6 @@ form > button[type=submit]:active, .icon-btn:active {
   transform: translateY(1px) scale(.97); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition-duration: .05s;
 }
 @media (prefers-reduced-motion: reduce) {
-  form > button[type=submit], .icon-btn { transition: none; }
+  form > button[type=submit], .icon-btn, #theme svg { transition: none; }
   form > button[type=submit]:hover, .icon-btn:hover, form > button[type=submit]:active, .icon-btn:active { transform: none; }
 }

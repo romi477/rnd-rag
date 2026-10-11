@@ -39,6 +39,8 @@ settings afterwards marks the results as outdated until the next run. The eraser
 Cards are numbered by rank; with an LLM answer, the cards used as sources keep a filled badge with
 their source number. The bug icon turns on debug mode: under each card and fragment it shows how the
 fragment was scored (`vector #rank cosine · bm25 #rank score · rrf · retrieval #rank · rerank`).
+The half-filled circle switches between the light and dark theme; until it is used, the page follows
+the system setting. The three icons sit in the title row, above the Find button.
 
 Search modes:
 
@@ -74,7 +76,7 @@ scripts/serve.sh      # web UI at http://127.0.0.1:8000
 | `update.sh [--force]` | `sync.sh` + `index.sh`; run it when docs change in Confluence |
 | `sync.sh [--force] [--attachments]` | download new/changed pages into `raw-data/`; `--reconvert` rebuilds the markdown offline |
 | `index.sh [--force] [--model M]` | chunk + embed changed pages into `data/lancedb/` |
-| `serve.sh [port]` | web UI + JSON API (`RAG_HOST` / `RAG_PORT` env vars also work) |
+| `serve.sh [port] [--offline]` | web UI + JSON API (`RAG_HOST` / `RAG_PORT` env vars also work); `--offline` skips the Hugging Face update check |
 | `search.sh "query" [--text]` | search from the terminal |
 | `ask.sh "question" [--no-rerank]` | search + streamed LLM answer with sources in the terminal |
 | `eval.sh [--misses]` | retrieval quality on `eval/queries.yaml` |
@@ -127,7 +129,7 @@ Each embedding model gets its own index directory, so models can be compared sid
 `scripts/index.sh --model BAAI/bge-base-en-v1.5`, then `scripts/eval.sh --model BAAI/bge-base-en-v1.5`.
 
 Models are cached in `~/.cache/huggingface` (override with `HF_HOME`). After the first download,
-`HF_HUB_OFFLINE=1` skips the update check on startup.
+`HF_HUB_OFFLINE=1` (or `scripts/serve.sh --offline`) skips the update check on startup.
 
 ## API
 

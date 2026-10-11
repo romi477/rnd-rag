@@ -30,7 +30,7 @@ scripts/index.sh --force      # full rebuild (chunking changes rebuild by themse
 scripts/sync.sh --reconvert   # offline: rebuild raw-data/*.md from the stored HTML (after converter changes)
 scripts/search.sh "query" --text
 scripts/ask.sh "question"     # search + LLM answer (LM Studio on :1234 with a model loaded)
-scripts/serve.sh [port]       # http://127.0.0.1:8000
+scripts/serve.sh [port] [--offline]   # http://127.0.0.1:8000; --offline: no Hugging Face update check
 scripts/eval.sh --misses      # retrieval metrics
 scripts/bench.sh M1 M2 [--group novice]   # compare LLMs on eval/bench.yaml, report in data/bench/
 scripts/test.sh               # pytest
@@ -53,8 +53,8 @@ Use `uv` only (`uv add`, `uv run`), no `pip`. Python 3.13 (`.python-version`); d
 | `src/rag/answer.py` | top pages → numbered sources within a token budget → system prompt → `stream_answer()` events (`sources`, `delta`, `done` with `truncated` / `error`, also for an empty answer) |
 | `src/rag/evaluation.py` | hit@k and MRR over `eval/queries.yaml` |
 | `src/rag/bench.py` | `rag bench`: the same questions and sources to several LLMs; time to first token, total time, tokens/s (from `usage`, requested via `stream_chat(usage=...)`), whether the `expect`ed page is among the sources; Markdown report with the answers side by side |
-| `src/rag/api.py` | FastAPI: `/api/search`, `/api/answer` (NDJSON stream, rerank on by default, `model` checked against the LLM server), `/api/llm`, `/api/products`; mounts `src/web/` (`config.WEB_DIR`) at `/`. `TrustedHostMiddleware` (`RAG_ALLOWED_HOSTS`), no `/docs`. Models warm up in a background thread; the search runs under a lock (MPS), the LLM stream outside it |
-| `src/web/` | UI, separate from the backend: `index.html`, `styles.css`, `app.js` (vanilla JS, no build step); talks to the backend only via `/api/*`. Browser-like tabs: each tab is an independent search state (form, results, answer, LLM model), persisted in `localStorage` (`rag.tabs.v1`; saved at most twice a second while streaming, a tab saved mid-request is stored as interrupted, windows merge each other's tabs via the `storage` event); a background tab keeps streaming. `renderMarkdown` handles fenced code, nested lists and ordered-list starts; inline code is protected from other markup |
+| `src/rag/api.py` | FastAPI: `/api/search`, `/api/answer` (NDJSON stream, rerank on by default, `model` checked against the LLM server), `/api/llm`, `/api/products`; mounts `src/web/` (`config.WEB_DIR`) at `/`. `TrustedHostMiddleware` (`RAG_ALLOWED_HOSTS`), no `/docs`. UI files are sent with `Cache-Control: no-cache` (no build step to version them). Models warm up in a background thread; the search runs under a lock (MPS), the LLM stream outside it |
+| `src/web/` | UI, separate from the backend: `index.html`, `styles.css`, `app.js` (vanilla JS, no build step); talks to the backend only via `/api/*`. Browser-like tabs: each tab is an independent search state (form, results, answer, LLM model), persisted in `localStorage` (`rag.tabs.v1`; saved at most twice a second while streaming, a tab saved mid-request is stored as interrupted, windows merge each other's tabs via the `storage` event); a background tab keeps streaming. Light / dark theme button (`rag.theme`; follows the system until used; `index.html` applies the saved theme before the first paint). `renderMarkdown` handles fenced code, nested lists and ordered-list starts; inline code is protected from other markup |
 | `src/rag/cli.py` | `rag` typer CLI; `scripts/*.sh` are thin wrappers over it |
 
 ## Conventions

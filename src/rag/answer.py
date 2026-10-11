@@ -31,7 +31,7 @@ when that helps.
 5. Keep menu paths, setting names, field names, error messages and code exactly as in the sources; \
 format them as `code` or **bold**. Write menu paths with "→"; never use LaTeX.
 6. Do not invent settings, menu paths, versions, prices or links.
-7. Answer in the language of the question. Be concise."""
+7. Always answer in English, like the documentation. Be concise."""
 
 NO_SOURCES = "Nothing relevant was found in the documentation for this question."
 EMPTY_ANSWER = "The model returned no answer text (a reasoning model may have spent max_tokens on thinking)."
