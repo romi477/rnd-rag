@@ -6,11 +6,14 @@ import re
 import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
 
 from rag import config
-from rag.chunking import IMAGE_MARK, approx_tokens
+from rag.chunking import approx_tokens
 from rag.llm import LLMClient, LLMError
-from rag.search import PageHit
+
+if TYPE_CHECKING:  # rag.search pulls in torch: not needed to build a prompt
+    from rag.search import PageHit
 
 SYSTEM_PROMPT = """\
 You are a support assistant that answers questions about product documentation.
@@ -31,6 +34,7 @@ format them as `code` or **bold**. Write menu paths with "→"; never use LaTeX.
 7. Answer in the language of the question. Be concise."""
 
 NO_SOURCES = "Nothing relevant was found in the documentation for this question."
+EMPTY_ANSWER = "The model returned no answer text (a reasoning model may have spent max_tokens on thinking)."
 
 
 @dataclass
@@ -42,7 +46,6 @@ class Source:
 
 
 def clean_text(text: str) -> str:
-    text = IMAGE_MARK.sub("", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -72,7 +75,7 @@ def build_context(
             break
         n = len(sources) + 1
         sources.append(Source(n, page.page_id, page.title, page.url))
-        path = " > ".join(c for c in page.breadcrumbs if c != "Home") or page.product
+        path = " > ".join(page.breadcrumbs) or page.product
         blocks.append(f"[{n}] {page.title}\nPath: {path}\n\n" + "\n\n".join(parts))
     return sources, "\n\n---\n\n".join(blocks)
 
@@ -89,7 +92,8 @@ def stream_answer(
 ) -> Iterator[dict]:
     """Events: sources -> delta* -> done, or an error event instead of done.
 
-    `model` overrides the client's default (the model loaded in LM Studio).
+    `model` overrides the client's default (the model loaded in LM Studio). `done.truncated` is
+    true when the answer was cut off by max_tokens.
     """
     sources, context = build_context(pages)
     yield {"type": "sources", "sources": [asdict(s) for s in sources]}
@@ -98,12 +102,21 @@ def stream_answer(
         yield {"type": "done", "model": None, "took_ms": 0}
         return
 
-    started = time.perf_counter()
+    started, info, answered = time.perf_counter(), {}, False
     try:
         model = model or llm.resolve_model()
-        for text in llm.stream_chat(build_messages(query, context), model=model):
+        for text in llm.stream_chat(build_messages(query, context), model=model, info=info):
+            answered = answered or bool(text.strip())
             yield {"type": "delta", "text": text}
     except LLMError as exc:
         yield {"type": "error", "message": str(exc)}
         return
-    yield {"type": "done", "model": model, "took_ms": round((time.perf_counter() - started) * 1000)}
+    if not answered:
+        yield {"type": "error", "message": EMPTY_ANSWER}
+        return
+    yield {
+        "type": "done",
+        "model": model,
+        "took_ms": round((time.perf_counter() - started) * 1000),
+        "truncated": info.get("finish_reason") == "length",
+    }

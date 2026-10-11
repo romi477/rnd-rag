@@ -4,5 +4,4 @@
 source "$(dirname "$0")/_common.sh"
 
 [ $# -gt 0 ] || die 'usage: scripts/search.sh "your question" [--text]'
-has_index || die "no search index yet: run scripts/update.sh first"
 uv run rag search "$@"

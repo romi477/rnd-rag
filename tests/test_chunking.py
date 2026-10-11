@@ -43,15 +43,15 @@ def test_split_blocks_keeps_code_with_blank_lines_whole():
 
 
 def test_small_page_is_single_chunk_with_context_header():
-    chunks = chunk_page(make_page("## A\n\n" + para(50) + "\n\n## B\n\n" + para(50)))
+    chunks = chunk_page(make_page("## A\n\n" + para(50) + "\n\n## B\n\n" + para(50)), max_tokens=500)
     assert len(chunks) == 1
     assert chunks[0].product == "Direct Print"
     assert chunks[0].embed_text.startswith("Direct Print > FAQ > How to Print\n\n")
 
 
 def test_empty_parent_page_is_skipped():
-    assert chunk_page(make_page("")) == []
-    assert chunk_page(make_page("## Children\n\n[image: x.png]")) == []
+    assert chunk_page(make_page(""), max_tokens=500) == []
+    assert chunk_page(make_page("## Children\n\n[image: x.png]"), max_tokens=500) == []
 
 
 def test_large_page_splits_by_section_and_merges_small_ones():
@@ -63,7 +63,8 @@ def test_large_page_splits_by_section_and_merges_small_ones():
         ]
     )
     chunks = chunk_page(make_page(body), max_tokens=400, min_tokens=80)
-    assert [c.section_path for c in chunks] == [["Install"], []]
+    # merged siblings have no common path: the larger one names the chunk
+    assert [c.section_path for c in chunks] == [["Install"], ["Configure"]]
     assert "## Configure" in chunks[1].text and "## Note" in chunks[1].text
     assert all(c.n_tokens <= 400 for c in chunks)
 
@@ -79,10 +80,11 @@ def test_oversized_section_split_on_paragraphs_code_kept_whole():
     assert all("Big" in c.embed_text.split("\n\n")[0] for c in chunks)
 
 
-def test_image_markers_not_embedded():
-    chunks = chunk_page(make_page("Text about labels " + para(30) + "\n\n[image: screen.png]"))
-    assert "[image:" in chunks[0].text
-    assert "[image:" not in chunks[0].embed_text
+def test_image_markers_dropped_from_chunks():
+    chunks = chunk_page(make_page("Text about labels " + para(30) + "\n\n[image: screen.png]\n\n*Caption*"), max_tokens=500)
+    assert "[image:" not in chunks[0].text and "[image:" not in chunks[0].embed_text
+    assert chunks[0].text.endswith("lorem\n\n*Caption*")
+    assert chunks[0].breadcrumbs == ["Direct Print", "FAQ"]  # the root page is dropped
 
 
 def test_approx_tokens():
@@ -109,10 +111,37 @@ def test_heading_emphasis_is_removed_from_path():
 
 
 def test_no_tiny_trailing_piece():
-    body = "## Big\n\n" + "\n\n".join([para(300), para(300), para(20)])
+    # 350 + 60 > 400: the 60-token tail would be a piece of its own without the merge
+    body = "## Big\n\n" + "\n\n".join([para(350), para(350), para(60)])
     chunks = chunk_page(make_page(body), max_tokens=400, min_tokens=80)
     assert len(chunks) == 2
     assert min(c.n_tokens for c in chunks) >= 80
+
+
+def test_heading_stays_with_its_text_when_a_section_is_split():
+    body = "## Big\n\n" + "\n\n".join([para(200), para(150), "### Step two", para(150)])
+    chunks = chunk_page(make_page(body), max_tokens=400, min_tokens=80)
+    assert not any(c.text.rstrip().endswith("### Step two") for c in chunks)
+    assert any(c.text.startswith("### Step two") for c in chunks)
+
+
+def test_tiny_trailing_section_is_merged_even_over_the_limit():
+    body = "## Install\n\n" + para(398) + "\n\n## Related pages\n\nSee also."
+    chunks = chunk_page(make_page(body), max_tokens=400, min_tokens=80)
+    assert [c.section_path for c in chunks] == [["Install"]]
+    assert chunks[0].text.endswith("## Related pages\n\nSee also.")
+
+
+def test_stray_fence_does_not_swallow_the_page():
+    body = "## A\n\n```py\n# comment\n```\n\n```\n\n" + para(300) + "\n\n## B\n\n" + para(300)
+    sections = split_sections(body)
+    assert [s.path for s in sections] == [["A"], ["B"]]
+    assert "# comment" in sections[0].content
+
+
+def test_heading_with_trailing_hash_kept():
+    assert split_sections("## Using C#\n\ntext")[0].path == ["Using C#"]
+    assert split_sections("## Closed ##\n\ntext")[0].path == ["Closed"]
 
 
 def test_short_parent_intro_attaches_to_children():

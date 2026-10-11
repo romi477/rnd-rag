@@ -12,10 +12,11 @@ from dataclasses import asdict
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from rag import config
 from rag.answer import stream_answer
-from rag.llm import LLMClient
+from rag.llm import LLMClient, LLMError
 from rag.search import MODES, PageHit, Searcher
 
 state: dict = {}
@@ -23,19 +24,29 @@ state: dict = {}
 lock = threading.Lock()
 
 
+def warm_up(searcher: Searcher) -> None:
+    """Load both models before the first search (rerank is on by default in the UI); requests
+    that come earlier wait on the lock instead of the server refusing connections."""
+    with lock:
+        searcher.embedder.embed_query("warm up")
+        searcher.reranker.score("warm up", ["warm up"])
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     searcher = Searcher()
-    # Load the models before the first request (rerank is on by default in the UI).
-    searcher.embedder.embed_query("warm up")
-    searcher.reranker.score("warm up", ["warm up"])
     state["searcher"] = searcher
     state["llm"] = LLMClient()
+    threading.Thread(target=warm_up, args=(searcher,), daemon=True).start()
     yield
     state.clear()
 
 
-app = FastAPI(title="rnd-rag", lifespan=lifespan)
+# No /docs or /redoc: they load scripts from a CDN, and everything here stays local.
+app = FastAPI(title="rnd-rag", lifespan=lifespan, docs_url=None, redoc_url=None)
+# Only answer to requests addressed to this machine by name: a page on another site that rebinds
+# its DNS name to 127.0.0.1 would otherwise read the docs. Bind to another interface? Add its name.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.ALLOWED_HOSTS)
 
 
 def run_search(
@@ -68,13 +79,20 @@ def answer(
     k: int = Query(10, ge=1, le=50),
     mode: str = "hybrid",
     product: str | None = None,
-    rerank: bool = False,
-    model: str | None = Query(None, description="LLM id; default: the model loaded in LM Studio"),
+    rerank: bool = True,  # the relevance cut-off keeps unrelated pages out of the prompt
+    model: str | None = Query(None, max_length=200, description="LLM id; default: the model loaded in LM Studio"),
 ) -> StreamingResponse:
     """Search + LLM answer as NDJSON events: results, sources, delta*, done | error.
 
     The search runs once: its results are the first event, the top pages become the sources.
     """
+    if model:
+        try:
+            known = {m["id"] for m in state["llm"].list_models()}
+        except LLMError:
+            known = None  # server down: the answer stream reports it
+        if known is not None and model not in known:
+            raise HTTPException(400, f"Unknown LLM model {model!r}")
     hits, took_ms = run_search(q, k, mode, product, rerank)
 
     def events() -> Iterator[str]:

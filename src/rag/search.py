@@ -3,6 +3,8 @@ cross-encoder rerank; results grouped by page."""
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -14,6 +16,10 @@ Mode = Literal["hybrid", "vector", "fts"]
 MODES: tuple[Mode, ...] = ("hybrid", "vector", "fts")
 
 RRF_K = 60
+# BM25 runs on words: quotes would make a phrase query, other operators are not meant as syntax.
+FTS_SYNTAX = re.compile(r'["\\]')
+
+log = logging.getLogger(__name__)
 
 COLUMNS = [
     "chunk_id", "page_id", "title", "product", "breadcrumbs", "section_path",
@@ -87,6 +93,8 @@ class Searcher:
         With `rerank`, the top `rerank_candidates` chunks are re-scored by the cross-encoder
         (0..1) and pages whose best chunk is below `min_score` are flagged `low_relevance`.
         """
+        if mode not in MODES:
+            raise ValueError(f"Unknown search mode {mode!r}, expected one of {MODES}")
         query = query.strip()
         if not query:
             return []
@@ -113,7 +121,10 @@ class Searcher:
     ) -> list[dict]:
         table = self.store.table
         if mode == "fts":
-            q = table.search(query, query_type="fts")
+            words = FTS_SYNTAX.sub(" ", query).strip()
+            if not words:
+                return []
+            q = table.search(words, query_type="fts")
         else:
             vector = self.embedder.embed_query(query)
             q = table.search(vector, query_type="vector").distance_type("cosine")
@@ -134,7 +145,14 @@ class Searcher:
         for mode, weight in (("vector", 1.0), ("fts", fts_weight)):
             if weight <= 0:
                 continue
-            for rank, row in enumerate(self.retrieve(query, mode, product, limit), 1):
+            try:
+                rows = self.retrieve(query, mode, product, limit)
+            except ValueError as exc:  # e.g. no BM25 index while the indexer rebuilds it
+                if mode != "fts":
+                    raise
+                log.warning("BM25 search failed, using vector results only: %s", exc)
+                continue
+            for rank, row in enumerate(rows, 1):
                 entry = fused.setdefault(row["chunk_id"], row | {"score": 0.0, "signals": {}})
                 entry["signals"].update(row["signals"])
                 entry["score"] += weight / (RRF_K + rank)

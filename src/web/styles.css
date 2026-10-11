@@ -76,6 +76,10 @@ label:has(input:disabled) { opacity: .6; cursor: not-allowed; }
 .answer-body li { margin: 3px 0; }
 .answer-body h3 { font-size: 15px; margin: 12px 0 4px; }
 .answer-body code { background: var(--code-bg); padding: 0 3px; border-radius: 3px; font-size: 13px; }
+.answer-body pre { background: var(--code-bg); padding: 8px 10px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+.answer-body pre code { background: none; padding: 0; white-space: pre; }
+.answer-body li > ul, .answer-body li > ol { margin: 2px 0; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .answer-body.streaming > :last-child::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }
 .answer-foot { margin-top: 10px; font-size: 12px; color: var(--muted); }
 .answer-error { margin-top: 8px; font-size: 13px; color: #c0392b; }

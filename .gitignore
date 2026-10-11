@@ -1,5 +1,7 @@
-# Secrets / local config
+# Secrets / local config (any .env variant: .env.local, .env.bak...)
 .env
+.env.*
+!.env.example
 .claude/settings.local.json
 
 # Internal content: never commit (public repo)
@@ -12,11 +14,10 @@ data/
 # - internal planning notes and results
 _docs/
 
-# - golden set derived from internal docs (see eval/queries.example.yaml)
-eval/queries.yaml
-
-# - LLM bench questions (see eval/bench.example.yaml)
-eval/bench.yaml
+# - golden set and LLM bench questions derived from internal docs, any variant
+#   (eval/queries.yaml, eval/bench.yaml, eval/bench2.yaml...); only the examples are public
+eval/*.yaml
+!eval/*.example.yaml
 
 # Python / tooling
 .venv/

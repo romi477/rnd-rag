@@ -10,8 +10,11 @@ const DEBUG_KEY = "rag.debug";
 
 let tabs = [];
 let activeId = null;
+let closedIds = []; // recently closed tabs, so that another window's copy of them is dropped too
 const controllers = {}; // tab id -> AbortController of its in-flight request
-let llmInfo = {available: false, model: null, models: [], error: "not checked yet"};
+let llmInfo = {available: false, model: null, models: [], error: "not checked yet", checked: false};
+let products = null; // product filter options, null until loaded
+const MODES = ["hybrid", "vector", "fts"];
 
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -23,39 +26,91 @@ function newTab(init = {}) {
 const activeTab = () => tabs.find((t) => t.id === activeId);
 const isActive = (tab) => tab.id === activeId;
 
+// A tab saved while its request runs is stored as interrupted: after a reload it must not look
+// finished (or "Searching…" forever).
+function persisted(t) {
+  if (!t.busy) return t;
+  const answer = t.answer && {...t.answer, streaming: false,
+    error: t.answer.streaming ? "Interrupted before the answer was complete." : t.answer.error};
+  return {...t, busy: false, answer, status: "Interrupted: run it again to update"};
+}
+
+let saveTimer = null;
 function save() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
   try {
-    const plain = tabs.map((t) => ({...t, busy: false, answer: t.answer && {...t.answer, streaming: false}}));
-    localStorage.setItem(STORE_KEY, JSON.stringify({tabs: plain, activeId}));
+    const stored = readStored();
+    // Tabs opened in another window since we last looked are kept, not overwritten.
+    const known = new Set([...tabs.map((t) => t.id), ...closedIds]);
+    const foreign = (stored?.tabs || []).filter((t) => !known.has(t.id));
+    const closed = [...new Set([...closedIds, ...(stored?.closed || [])])].slice(-50);
+    localStorage.setItem(STORE_KEY, JSON.stringify({tabs: [...tabs.map(persisted), ...foreign], activeId, closed}));
   } catch { /* storage full or blocked: tabs just won't persist */ }
 }
 
-function load() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (saved?.tabs?.length) {
-      tabs = saved.tabs;
-      activeId = tabs.some((t) => t.id === saved.activeId) ? saved.activeId : tabs[0].id;
-    }
-  } catch { /* corrupted or unavailable storage: start fresh */ }
+// While an answer streams, save at most twice a second instead of on every token.
+function saveSoon() {
+  if (!saveTimer) saveTimer = setTimeout(save, 500);
 }
+
+function readStored() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch { return null; }
+}
+
+function load() {
+  const saved = readStored();
+  if (saved?.tabs?.length) {
+    tabs = saved.tabs.map(sanitize);
+    activeId = tabs.some((t) => t.id === saved.activeId) ? saved.activeId : tabs[0].id;
+  }
+}
+
+// Another window changed the tabs: take its new ones and drop the ones it closed.
+window.addEventListener("storage", (e) => {
+  if (e.key !== STORE_KEY) return;
+  const stored = readStored();
+  if (!stored?.tabs) return;
+  const gone = new Set(stored.closed || []);
+  const mine = new Set(tabs.map((t) => t.id));
+  tabs = tabs.filter((t) => !gone.has(t.id) || controllers[t.id]);
+  tabs.push(...stored.tabs.filter((t) => !mine.has(t.id) && !closedIds.includes(t.id)).map(sanitize));
+  if (!tabs.length) tabs.push(newTab());
+  if (!activeTab()) { activeId = tabs[0].id; renderView(); } else renderTabs();
+});
+
+// Values from localStorage or a URL may be stale or hand-made.
+function sanitize(t) {
+  const tab = {...newTab(), ...t};
+  if (!MODES.includes(tab.mode)) tab.mode = "hybrid";
+  for (const k of ["q", "product", "model"]) if (typeof tab[k] !== "string") tab[k] = "";
+  tab.q = tab.q.slice(0, 500);
+  for (const k of ["rerank", "llm"]) tab[k] = !!tab[k];
+  return tab;
+}
+
+const hasOption = (select, value) => [...$(select).options].some((o) => o.value === value);
 
 function readForm(tab) {
   tab.q = $("q").value.trim();
-  tab.product = $("product").value;
+  // until the options are loaded, the selects can't show the tab's choice: keep it
+  if (products) tab.product = $("product").value;
   tab.mode = $("mode").value;
   tab.rerank = $("rerank").checked;
   tab.llm = $("llm").checked;
-  tab.model = $("model").value;
+  if (llmInfo.checked) tab.model = $("model").value;
 }
 
 function writeForm(tab) {
+  // a product or model that no longer exists falls back to "all" / the default model
+  if (products && !hasOption("product", tab.product)) tab.product = "";
+  if (llmInfo.checked && !hasOption("model", tab.model)) tab.model = "";
   $("q").value = tab.q;
-  $("product").value = tab.product;
+  $("product").value = hasOption("product", tab.product) ? tab.product : "";
   $("mode").value = tab.mode;
   $("rerank").checked = tab.rerank;
   $("llm").checked = tab.llm;
-  $("model").value = [...$("model").options].some((o) => o.value === tab.model) ? tab.model : "";
+  $("model").value = hasOption("model", tab.model) ? tab.model : "";
   updateSubmitLabel(tab);
 }
 
@@ -77,6 +132,7 @@ function statusText(tab) {
 
 function onSettingsChange() {
   const tab = activeTab();
+  if (!tab) return;
   readForm(tab);
   updateSubmitLabel(tab);
   $("status").textContent = statusText(tab);
@@ -94,9 +150,9 @@ function terms(query) {
   return [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) || [])].filter((t) => !STOP.has(t));
 }
 
-// Light markdown cleanup for display: drop image markers and heading hashes.
+// Light markdown cleanup for display: drop heading hashes and blank lines.
 function clean(text) {
-  return text.replace(/\[image: [^\]]*\]/g, "").replace(/^#{1,6}\s+/gm, "").replace(/\n{2,}/g, "\n").trim();
+  return text.replace(/^#{1,6}\s+/gm, "").replace(/\n{2,}/g, "\n").trim();
 }
 
 function shortUrl(u) {
@@ -191,14 +247,14 @@ function setDebug(on) {
 }
 
 function card(p, ts, open, rank) {
-  const crumbs = p.breadcrumbs.filter((c) => c !== "Home").join(" › ") || p.product;
+  const crumbs = p.breadcrumbs.join(" › ") || p.product;
   const updated = p.updated ? new Date(p.updated).toLocaleDateString() : "";
   const chunks = p.chunks.map((c, ci) => `
     <div class="chunk">
       ${c.section_path.length ? `<div class="section">§ ${escapeHtml(c.section_path.join(" › "))}</div>` : ""}
       ${ci > 0 ? signalsHtml(c.signals) : "" /* the best fragment's signals are in the header */}
       <div class="snippet">${highlight(snippet(c.text, ts), ts)}</div>
-      ${c.text.length > 420 ? `<details><summary>Show full fragment</summary><div class="full">${highlight(clean(c.text), ts)}</div></details>` : ""}
+      ${clean(c.text).length > 420 ? `<details><summary>Show full fragment</summary><div class="full">${highlight(clean(c.text), ts)}</div></details>` : ""}
     </div>`).join("");
   return `
     <details class="result" data-page-id="${escapeHtml(p.page_id)}"${open ? " open" : ""}>
@@ -215,31 +271,63 @@ function card(p, ts, open, rank) {
 // --- LLM answer ---------------------------------------------------------------
 
 function inlineMd(text, sources) {
-  return escapeHtml(text.replace(/\$?\\(?:long)?(?:right)?arrow\$?|\$\\to\$/gi, "→"))
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+  // Code spans first, into placeholders: their content is literal (no *emphasis*, no [n] links).
+  const codes = [];
+  const html = escapeHtml(text.replace(/\$?\\(?:long)?(?:right)?arrow\$?|\$\\to\$/gi, "→"))
+    .replace(/`([^`\n]+)`/g, (m, code) => `\u0000${codes.push(code) - 1}\u0000`)
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|[^*])\*([^*\s][^*\n]*)\*/g, "$1<em>$2</em>")
+    // *em*: opens after a space or line start, closes before a space or punctuation, so that
+    // "*.pdf and *.xml" stays as typed
+    .replace(/(^|[\s(])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?=[\s.,;:!?)]|$)/g, "$1<em>$2</em>")
     .replace(/\[(\d+)\]/g, (m, n) => {
       const src = sources[n - 1];
       return src ? `<a class="cite" href="#src-${n}" title="${escapeHtml(src.title)}">${n}</a>` : m;
     });
+  return html.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[i]}</code>`);
 }
 
-// Minimal block markdown for LLM output: paragraphs, bullet/numbered lists, headings.
+// Block markdown for LLM output: paragraphs, headings, fenced code, nested bullet / numbered lists.
+// A blank line between list items doesn't end the list (models often write "1. …\n\n2. …").
 function renderMarkdown(text, sources) {
-  let html = "", list = null, para = [];
+  let html = "", para = [], fence = null, code = [];
+  const lists = []; // open lists, innermost last: {tag, indent}
   const flushPara = () => { if (para.length) { html += `<p>${inlineMd(para.join(" "), sources)}</p>`; para = []; } };
-  const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
-  const openList = (tag) => { flushPara(); if (list !== tag) { closeList(); html += `<${tag}>`; list = tag; } };
+  const closeLists = (indent = -1) => {
+    while (lists.length && lists.at(-1).indent > indent) html += `</li></${lists.pop().tag}>`;
+  };
   for (const line of text.split("\n")) {
+    if (fence) {
+      if (line.trim().startsWith(fence) && !line.trim().slice(fence.length).trim()) {
+        html += `<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`;
+        fence = null; code = [];
+      } else code.push(line);
+      continue;
+    }
     let m;
-    if (!line.trim()) { flushPara(); closeList(); }
-    else if ((m = line.match(/^\s*[-*•]\s+(.*)$/))) { openList("ul"); html += `<li>${inlineMd(m[1], sources)}</li>`; }
-    else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) { openList("ol"); html += `<li>${inlineMd(m[1], sources)}</li>`; }
-    else if ((m = line.match(/^#{1,6}\s+(.*)$/))) { flushPara(); closeList(); html += `<h3>${inlineMd(m[1], sources)}</h3>`; }
-    else { closeList(); para.push(line.trim()); }
+    if ((m = line.match(/^\s*(`{3,}|~{3,})/))) { flushPara(); closeLists(); fence = m[1]; continue; }
+    if (!line.trim()) { flushPara(); continue; }
+    if ((m = line.match(/^(\s*)([-*•]|(\d+)[.)])\s+(.*)$/))) {
+      flushPara();
+      const indent = m[1].replace(/\t/g, "    ").length, tag = m[3] ? "ol" : "ul";
+      closeLists(indent);
+      const top = lists.at(-1);
+      if (top && top.indent === indent && top.tag !== tag) { html += `</li></${lists.pop().tag}>`; }
+      if (lists.at(-1)?.indent === indent) html += "</li><li>";
+      else {
+        const start = m[3] && m[3] !== "1" ? ` start="${+m[3]}"` : "";
+        html += `<${tag}${start}><li>`;
+        lists.push({tag, indent});
+      }
+      html += inlineMd(m[4], sources);
+      continue;
+    }
+    if ((m = line.match(/^#{1,6}\s+(.*)$/))) { flushPara(); closeLists(); html += `<h3>${inlineMd(m[1], sources)}</h3>`; continue; }
+    if (lists.length && /^\s/.test(line)) { html += " " + inlineMd(line.trim(), sources); continue; } // item continues
+    closeLists();
+    para.push(line.trim());
   }
-  flushPara(); closeList();
+  if (fence) html += `<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`; // still streaming
+  flushPara(); closeLists();
   return html;
 }
 
@@ -260,16 +348,25 @@ function markSources(sources) {
   });
 }
 
+const answerBody = ({text, sources, streaming}) =>
+  text ? renderMarkdown(text, sources) : (streaming ? "" : "<p>No answer.</p>");
+
 function renderAnswer(answer) {
   if (!answer) { $("answer").hidden = true; return; }
-  const {text, sources, streaming, footer, error, model} = answer;
+  const {streaming, footer, error, model} = answer;
   $("answer").hidden = false;
   $("answer").innerHTML = `<details class="answer-panel"${answer.open === false ? "" : " open"}>
     <summary class="answer-head">Answer${model ? ` · <span class="answer-model">${escapeHtml(model)}</span>` : ""}${streaming ? ' <span class="pulse">generating…</span>' : ""}</summary>
-    <div class="answer-body${streaming ? " streaming" : ""}">${text ? renderMarkdown(text, sources) : (streaming ? "" : "<p>No answer.</p>")}</div>
+    <div class="answer-body${streaming ? " streaming" : ""}">${answerBody(answer)}</div>
     ${error ? `<div class="answer-error">${escapeHtml(error)}</div>` : ""}
     ${footer ? `<div class="answer-foot">${escapeHtml(footer)}</div>` : ""}
   </details>`;
+}
+
+// A new token only re-renders the answer text, not the panel around it.
+function renderAnswerText(answer) {
+  const body = $("answer").querySelector(".answer-body");
+  if (body) body.innerHTML = answerBody(answer); else renderAnswer(answer);
 }
 
 // --- view -----------------------------------------------------------------------
@@ -277,7 +374,7 @@ function renderAnswer(answer) {
 function renderTabs() {
   // Tabs are named by position: Tab1, Tab2...; the query shows in the tooltip.
   $("tabs").innerHTML = tabs.map((t, i) => `
-    <div class="tab${t.id === activeId ? " active" : ""}" data-id="${t.id}" title="${escapeHtml(t.q || "New search")}" role="tab" aria-selected="${t.id === activeId}">
+    <div class="tab${t.id === activeId ? " active" : ""}" data-id="${t.id}" title="${escapeHtml(t.q || "New search")}" role="tab" aria-selected="${t.id === activeId}" tabindex="${t.id === activeId ? 0 : -1}">
       ${t.busy ? '<span class="tab-busy" aria-label="loading"></span>' : ""}
       <span class="tab-title">Tab${i + 1}</span>
       ${t.llm && t.model ? `<span class="tab-model">${escapeHtml(t.model.split("/").pop())}</span>` : ""}
@@ -332,6 +429,8 @@ function addTab() {
 }
 
 function closeTab(id) {
+  if (id !== activeId) readForm(activeTab()); // keep what is typed in the tab that stays
+  closedIds = [...closedIds, id].slice(-50);
   controllers[id]?.abort();
   const i = tabs.findIndex((t) => t.id === id);
   tabs.splice(i, 1);
@@ -344,6 +443,7 @@ function closeTab(id) {
 // Clear the active tab: query, results and answer; the filters stay.
 function clearResults() {
   const tab = activeTab();
+  if (!tab) return;
   controllers[tab.id]?.abort();
   delete controllers[tab.id];
   Object.assign(tab, {q: "", data: null, answer: null, status: "", busy: false, open: {}});
@@ -374,10 +474,21 @@ async function readNdjson(res, onEvent) {
   }
 }
 
+// "422 {"detail":[{"msg": ...}]}" -> "422: String should have at most 500 characters"
+async function httpError(res) {
+  const body = await res.text();
+  let detail = body;
+  try {
+    const d = JSON.parse(body).detail;
+    detail = Array.isArray(d) ? d.map((x) => x.msg).join("; ") : String(d ?? body);
+  } catch { /* not JSON */ }
+  return new Error(`${res.status}: ${detail}`.slice(0, 300));
+}
+
 async function runAnswer(tab, params, signal) {
   if (tab.model) params.set("model", tab.model);
   const res = await fetch("/api/answer?" + params, {signal});
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) throw await httpError(res);
   const a = tab.answer;
   await readNdjson(res, (ev) => {
     if (ev.type === "results") {
@@ -386,19 +497,27 @@ async function runAnswer(tab, params, signal) {
       if (isActive(tab)) { $("status").textContent = tab.status; renderResults(ev, tab); }
       return;
     }
+    if (ev.type === "delta") {
+      a.text += ev.text;
+      if (isActive(tab)) renderAnswerText(a);
+      saveSoon();
+      return;
+    }
     if (ev.type === "sources") a.sources = ev.sources;
-    else if (ev.type === "delta") a.text += ev.text;
     else if (ev.type === "done") {
       a.streaming = false;
       a.model = ev.model || a.model;
       a.footer = ev.model ? `${(ev.took_ms / 1000).toFixed(1)} s · based on ${a.sources.length} source${a.sources.length === 1 ? "" : "s"}` : "";
+      if (ev.truncated) a.error = "The answer was cut off: it reached the max_tokens limit (RAG_LLM_MAX_TOKENS).";
     } else if (ev.type === "error") { a.streaming = false; a.error = "LLM error: " + ev.message; }
     if (isActive(tab)) { renderAnswer(a); if (ev.type === "sources") markSources(a.sources); }
   });
+  if (a.streaming) { a.streaming = false; a.error = "The connection closed before the answer was complete."; }
 }
 
 async function run() {
   const tab = activeTab();
+  if (!tab) return;
   readForm(tab);
   if (!tab.q) return;
   const useLlm = tab.llm && llmInfo.available;
@@ -417,7 +536,7 @@ async function run() {
       await runAnswer(tab, params, controller.signal);
     } else {
       const res = await fetch("/api/search?" + params, {signal: controller.signal});
-      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      if (!res.ok) throw await httpError(res);
       tab.data = await res.json();
       tab.status = statusOf(tab.data);
     }
@@ -437,9 +556,10 @@ async function run() {
 // --- LLM models ---------------------------------------------------------------
 
 async function refreshLlmStatus() {
-  llmInfo = await fetch("/api/llm").then((r) => r.json())
+  const info = await fetch("/api/llm").then((r) => (r.ok ? r.json() : Promise.reject(r)))
     .catch(() => ({available: false, model: null, models: [], error: "backend not reachable"}));
-  const selected = $("model").value || activeTab()?.model || "";
+  const selected = llmInfo.checked ? $("model").value : activeTab()?.model || "";
+  llmInfo = {...info, checked: true};
   $("model").innerHTML = `<option value="">Default (${escapeHtml(llmInfo.model || "none")})</option>` +
     llmInfo.models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${m.loaded === false ? " (not loaded)" : ""}</option>`).join("");
   $("model").value = [...$("model").options].some((o) => o.value === selected) ? selected : "";
@@ -452,30 +572,36 @@ async function refreshLlmStatus() {
 
 // --- init ---------------------------------------------------------------------
 
-async function init() {
-  const products = await fetch("/api/products").then((r) => r.json()).catch(() => []);
-  $("product").insertAdjacentHTML("beforeend", products.map((p) => `<option>${escapeHtml(p)}</option>`).join(""));
-  await refreshLlmStatus();
+const flag = (v, fallback) => (v === null ? fallback : ["1", "true", "yes", "on"].includes(v.toLowerCase()));
 
-  load();
-  // A shared link (?q=...) opens in its own tab unless a tab with the same query exists.
+// A shared link (?q=...) shows the tab with exactly these settings (the active one first),
+// or opens a new tab and runs it.
+function openFromUrl() {
   const params = new URLSearchParams(location.search);
-  const q = params.get("q");
-  let runNow = false;
-  if (q) {
-    const existing = tabs.find((t) => t.q === q);
-    if (existing) activeId = existing.id;
-    else {
-      const tab = newTab({q, product: params.get("product") || "", mode: params.get("mode") || "hybrid",
-        rerank: params.get("rerank") !== "false", llm: params.get("llm") === "true", model: params.get("model") || ""});
-      tabs.push(tab);
-      activeId = tab.id;
-      runNow = true;
-    }
-  }
+  if (!params.get("q")) return false;
+  const wanted = sanitize({q: params.get("q").trim(), product: params.get("product") || "", mode: params.get("mode") || "hybrid",
+    rerank: flag(params.get("rerank"), true), llm: flag(params.get("llm"), false), model: params.get("model") || ""});
+  const same = (t) => SETTINGS.every((k) => t[k] === wanted[k] || (k === "model" && !t.llm));
+  const existing = [activeTab(), ...tabs].find((t) => t && same(t));
+  if (existing) { activeId = existing.id; return !existing.data; }
+  tabs.push(wanted);
+  activeId = wanted.id;
+  return true;
+}
+
+async function init() {
+  // Tabs first, so the form works right away; the options load after.
+  load();
+  const runNow = openFromUrl();
   if (!tabs.length) { tabs.push(newTab()); activeId = tabs[0].id; }
   $("debug").setAttribute("aria-pressed", String(debug));
   renderView();
+  refreshLlmStatus(); // LM Studio may be slow to answer: don't wait for it
+  const list = await fetch("/api/products").then((r) => (r.ok ? r.json() : [])).catch(() => []);
+  $("product").insertAdjacentHTML("beforeend", list.map((p) => `<option>${escapeHtml(p)}</option>`).join(""));
+  products = list;
+  const tab = activeTab();
+  if (hasOption("product", tab.product)) $("product").value = tab.product; else tab.product = "";
   if (runNow) run();
 }
 
@@ -490,18 +616,34 @@ $("tabs").addEventListener("click", (e) => {
   const tab = e.target.closest(".tab");
   if (tab) switchTab(tab.dataset.id);
 });
+// Keyboard: Enter / Space selects the focused tab, arrows move between tabs.
+$("tabs").addEventListener("keydown", (e) => {
+  const tab = e.target.closest(".tab");
+  if (!tab || e.target.closest("button")) return;
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); switchTab(tab.dataset.id); }
+  else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    const i = tabs.findIndex((t) => t.id === tab.dataset.id) + (e.key === "ArrowRight" ? 1 : -1);
+    if (tabs[i]) { switchTab(tabs[i].id); $("tabs").querySelector(`[data-id="${tabs[i].id}"]`)?.focus(); }
+  }
+});
 // Middle click closes a tab, like in a browser.
 $("tabs").addEventListener("auxclick", (e) => {
   const tab = e.target.closest(".tab");
   if (e.button === 1 && tab && tabs.length > 1) closeTab(tab.dataset.id);
 });
 // Remember expanded / collapsed cards and answer per tab ("toggle" doesn't bubble: capture it).
+// Re-rendering an open <details> fires "toggle" too: only a real change is saved.
 document.addEventListener("toggle", (e) => {
   const el = e.target, tab = activeTab();
   if (!tab || !el.isConnected) return;
-  if (el.matches(".result")) (tab.open ||= {})[el.dataset.pageId] = el.open;
-  else if (el.matches(".answer-panel") && tab.answer) tab.answer.open = el.open;
-  else return;
+  if (el.matches(".result")) {
+    const cards = [...document.querySelectorAll(".result")];
+    if (isOpen(tab, el.dataset.pageId, cards.indexOf(el)) === el.open) return;
+    (tab.open ||= {})[el.dataset.pageId] = el.open;
+  } else if (el.matches(".answer-panel") && tab.answer) {
+    if ((tab.answer.open !== false) === el.open) return;
+    tab.answer.open = el.open;
+  } else return;
   save();
 }, true);
 // A citation [n] expands the source card it jumps to.

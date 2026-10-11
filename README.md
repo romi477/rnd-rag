@@ -72,17 +72,23 @@ scripts/serve.sh      # web UI at http://127.0.0.1:8000
 |---|---|
 | `setup.sh` | `uv sync`; creates `.env` from `.env.example` if missing |
 | `update.sh [--force]` | `sync.sh` + `index.sh`; run it when docs change in Confluence |
-| `sync.sh [--force] [--attachments]` | download new/changed pages into `raw-data/` |
+| `sync.sh [--force] [--attachments]` | download new/changed pages into `raw-data/`; `--reconvert` rebuilds the markdown offline |
 | `index.sh [--force] [--model M]` | chunk + embed changed pages into `data/lancedb/` |
-| `serve.sh [port]` | web UI + JSON API (`HOST` / `PORT` env vars also work) |
+| `serve.sh [port]` | web UI + JSON API (`RAG_HOST` / `RAG_PORT` env vars also work) |
 | `search.sh "query" [--text]` | search from the terminal |
-| `ask.sh "question" [--rerank]` | search + streamed LLM answer with sources in the terminal |
+| `ask.sh "question" [--no-rerank]` | search + streamed LLM answer with sources in the terminal |
 | `eval.sh [--misses]` | retrieval quality on `eval/queries.yaml` |
 | `bench.sh [MODEL ...] [--group G]` | compare LLMs on `eval/bench.yaml`: latency, tokens/s, answers side by side |
 | `test.sh` | unit tests |
 
 The scripts are thin wrappers over the `rag` CLI: `uv run rag --help`.
-A running server picks up index updates without a restart.
+A running server picks up index updates without a restart: the indexer replaces a page's chunks
+in one commit, so searches never see a page missing, even during `index.sh --force`.
+
+Safety nets (each one lifted by `--force`): a sync that would delete more than a quarter of the local
+pages stops (an empty or partial listing from Confluence), and so does an index run that would
+drop more than a quarter of the indexed pages or index another space into the same directory.
+The index also records the chunking settings and rebuilds itself when they change.
 
 ## Configuration
 
@@ -110,6 +116,12 @@ Tuning (env, see `src/rag/config.py`):
 | `RAG_LLM_REASONING` | `none`: sent as `reasoning_effort`, turns off "thinking" for faster answers; empty: not sent |
 | `RAG_LLM_TEMPERATURE` / `RAG_LLM_MAX_TOKENS` | `0.2` / `1000` |
 | `RAG_LLM_CONTEXT_PAGES` / `RAG_LLM_CONTEXT_TOKENS` | `5` / `4000`: how much of the search result goes into the prompt |
+| `RAG_ALLOWED_HOSTS` | `127.0.0.1,localhost`: host names the server answers to (see below) |
+
+The server binds to `127.0.0.1` and answers only to requests addressed to `127.0.0.1` or `localhost`,
+so a web page elsewhere can't reach it by DNS rebinding. It has no login: binding to another
+interface (`RAG_HOST=0.0.0.0`) shares the internal docs with the network, and then the machine's
+name has to go into `RAG_ALLOWED_HOSTS`. There are no `/docs` pages (they load scripts from a CDN).
 
 Each embedding model gets its own index directory, so models can be compared side by side:
 `scripts/index.sh --model BAAI/bge-base-en-v1.5`, then `scripts/eval.sh --model BAAI/bge-base-en-v1.5`.
@@ -120,6 +132,9 @@ Models are cached in `~/.cache/huggingface` (override with `HF_HOME`). After the
 ## API
 
 `GET /api/search?q=...&k=10&mode=hybrid|vector|fts&product=...&rerank=false`
+
+Quotes and backslashes in `q` are ignored by the BM25 side (no phrase queries); if the BM25 index is
+missing (an interrupted rebuild), hybrid search falls back to vectors only.
 
 ```json
 {
@@ -132,7 +147,8 @@ Models are cached in `~/.cache/huggingface` (override with `HF_HOME`). After the
 }
 ```
 
-`GET /api/answer` takes the same parameters plus optional `model` (an LLM id; default: the model
+`GET /api/answer` takes the same parameters (but `rerank` is on by default, so that unrelated pages
+stay out of the prompt) plus optional `model` (an LLM id known to the LLM server; default: the model
 loaded in LM Studio) and streams NDJSON (one JSON event per line).
 The search runs once: its results come first, then the answer.
 
@@ -140,8 +156,11 @@ The search runs once: its results come first, then the answer.
 {"type": "results", "query": "...", "took_ms": 54, "results": [...]}   same as /api/search
 {"type": "sources", "sources": [{"n": 1, "page_id": "...", "title": "...", "url": "..."}]}
 {"type": "delta", "text": "The error means ... [1]"}                  repeated while streaming
-{"type": "done", "model": "...", "took_ms": 1771}                      or {"type": "error", "message": "..."}
+{"type": "done", "model": "...", "took_ms": 1771, "truncated": false}  or {"type": "error", "message": "..."}
 ```
+
+`truncated` is true when the answer hit `RAG_LLM_MAX_TOKENS`. A stream that the LLM server closes
+early, or an answer with no text (a reasoning model that spent the budget thinking), is an `error`.
 
 `GET /api/llm` reports whether answer generation is available, the default model and all chat
 models with their load state (`{"available", "model", "models": [{"id", "loaded"}], "error"}`).
@@ -172,7 +191,10 @@ The models answer the same questions from the same sources, with the prompt the 
 terminal shows time to the first token, answer time and tokens/s per model, plus how often the
 expected page made it into the sources. The Markdown report in `data/bench/` puts the answers side
 by side, to be checked against the docs (quality is not scored automatically). Models that are not
-loaded in LM Studio get loaded during the warm-up, which is not measured.
+loaded in LM Studio get loaded during the warm-up, which is not measured; a model that fails it
+stops the bench. The report is rewritten after every question, so Ctrl-C keeps what was measured.
+Tokens/s counts all generated tokens (reasoning included) over the time from the first generated
+token, summed over all answers. A custom `--out` must be git-ignored: the report quotes the docs.
 
 ## Layout
 
@@ -196,7 +218,7 @@ tests/                   unit tests (fake embedder and mocked LLM server: no dow
 ```
 
 Not in git: `raw-data/` (synced pages), `data/` (index), `_docs/` (internal notes),
-`eval/queries.yaml`, `eval/bench.yaml`, `.env`.
+`eval/*.yaml` except the examples, `.env` and its variants.
 
 ## Roadmap
 

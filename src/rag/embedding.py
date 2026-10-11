@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import cached_property
+from functools import cached_property, lru_cache
 
 import numpy as np
 import torch
@@ -17,6 +17,7 @@ QUERY_PROMPTS = {
     "BAAI/bge-large-en-v1.5": "Represent this sentence for searching relevant passages: ",
 }
 MAX_SEQ_LENGTH = 1024  # chunks are <= ~600 tokens; caps memory for long-context models
+CACHE_SIZE = 4096  # queries / (query, passage) pairs; eval and repeated UI searches hit it
 
 
 def default_device() -> str:
@@ -41,6 +42,12 @@ class Embedder:
     def dim(self) -> int:
         return self.model.get_embedding_dimension()
 
+    def count_truncated(self, texts: list[str]) -> int:
+        """How many texts exceed the model's input length (their tail would not be embedded)."""
+        limit = self.model.max_seq_length
+        lengths = self.model.tokenizer(texts, add_special_tokens=True, truncation=False)["input_ids"]
+        return sum(len(ids) > limit for ids in lengths)
+
     def embed_documents(self, texts: list[str], batch_size: int = 16) -> np.ndarray:
         return self.model.encode(
             texts,
@@ -51,6 +58,10 @@ class Embedder:
         ).astype(np.float32)
 
     def embed_query(self, query: str) -> np.ndarray:
+        return self._embed_query(query).copy()
+
+    @lru_cache(maxsize=CACHE_SIZE)  # the cache keeps the embedder alive: there is one per process
+    def _embed_query(self, query: str) -> np.ndarray:
         kwargs = {}
         if "query" in (self.model.prompts or {}):
             kwargs["prompt_name"] = "query"
@@ -65,13 +76,19 @@ class Reranker:
     def __init__(self, model_name: str = config.RERANK_MODEL, device: str | None = None):
         self.model_name = model_name
         self.device = device or default_device()
+        self._cache: dict[tuple[str, str], float] = {}
 
     @cached_property
     def model(self) -> CrossEncoder:
         return CrossEncoder(self.model_name, device=self.device, max_length=MAX_SEQ_LENGTH)
 
     def score(self, query: str, passages: list[str]) -> list[float]:
-        if not passages:
-            return []
-        scores = self.model.predict([(query, p) for p in passages], batch_size=16)
-        return [float(s) for s in scores]
+        """Relevance 0..1 per passage; pairs scored before come from the cache."""
+        cache = self._cache
+        todo = list(dict.fromkeys(p for p in passages if (query, p) not in cache))
+        if todo:
+            scores = self.model.predict([(query, p) for p in todo], batch_size=16)
+            if len(cache) > CACHE_SIZE:
+                cache.clear()
+            cache.update({(query, p): float(s) for p, s in zip(todo, scores, strict=True)})
+        return [cache[(query, p)] for p in passages]

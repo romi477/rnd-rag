@@ -3,14 +3,14 @@ import json
 import httpx
 import pytest
 
-from rag.answer import NO_SOURCES, build_context, build_messages, stream_answer
-from rag.llm import LLMClient, LLMError, parse_sse
+from rag.answer import EMPTY_ANSWER, NO_SOURCES, build_context, build_messages, stream_answer
+from rag.llm import LLMClient, LLMError, parse_sse, split_lines
 from rag.search import ChunkHit, PageHit
 
 
 def page(pid: str, title: str, texts: list[str], product: str = "Printing") -> PageHit:
     chunks = [ChunkHit(f"{pid}:{i}", ["Setup"] if i else [], t, 1.0) for i, t in enumerate(texts)]
-    return PageHit(pid, title, f"https://x/{pid}", product, ["Home", product], "2026-01-01", [], 1.0, chunks)
+    return PageHit(pid, title, f"https://x/{pid}", product, [product], "2026-01-01", [], 1.0, chunks)
 
 
 def sse(*events) -> list[str]:
@@ -33,11 +33,36 @@ def test_parse_sse_yields_content_and_skips_reasoning():
     assert "".join(parse_sse(lines)) == "Hello world"
 
 
-def test_parse_sse_collects_usage():
-    usage = {}
-    lines = sse(delta(content="Hi"), {"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 1}})
-    assert "".join(parse_sse(lines, usage)) == "Hi"
-    assert usage == {"prompt_tokens": 12, "completion_tokens": 1}
+def test_parse_sse_collects_usage_and_finish_reason():
+    info = {}
+    lines = sse(
+        delta(content="Hi"),
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+        {"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 1}},
+    )
+    assert "".join(parse_sse(lines, info)) == "Hi"
+    assert info["usage"] == {"prompt_tokens": 12, "completion_tokens": 1} and info["finish_reason"] == "length"
+    assert info["first_delta_at"] > 0
+
+
+def test_parse_sse_cut_off_stream_is_an_error():
+    lines = [f"data: {json.dumps(delta(content='Half an ans'))}"]  # no finish_reason, no [DONE]
+    with pytest.raises(LLMError, match="before the answer was complete"):
+        list(parse_sse(lines))
+    # a finish reason without [DONE] is a complete answer
+    assert "".join(parse_sse([f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}, 'finish_reason': 'stop'}]})}"])) == "ok"
+
+
+def test_parse_sse_tolerates_null_fields():
+    lines = sse({"error": None, "choices": None}, delta(content="ok"))
+    assert "".join(parse_sse(lines)) == "ok"
+
+
+def test_split_lines_keeps_unicode_line_separators():
+    text = "Line\u2028 and\u0085 more"
+    body = f"data: {json.dumps(delta(content=text), ensure_ascii=False)}\n\ndata: [DONE]\n"
+    lines = list(split_lines([body[:20], body[20:]]))  # split across network chunks
+    assert "".join(parse_sse(lines)) == text
 
 
 def test_parse_sse_stops_at_done_and_raises_on_error():
@@ -50,12 +75,12 @@ def test_parse_sse_stops_at_done_and_raises_on_error():
 
 
 def test_build_context_numbers_pages_and_cleans_text():
-    pages = [page("1", "Install", ["Run the installer. [image: shot.png]", "Then restart."]), page("2", "Labels", ["Label text."])]
+    pages = [page("1", "Install", ["Run the installer.\n\n\n\n", "Then restart."]), page("2", "Labels", ["Label text."])]
     sources, context = build_context(pages, max_pages=5, max_tokens=1000)
     assert [(s.n, s.page_id) for s in sources] == [(1, "1"), (2, "2")]
     assert context.startswith("[1] Install\nPath: Printing\n\nRun the installer.")
     assert "(Section: Setup)\nThen restart." in context
-    assert "[2] Labels" in context and "[image:" not in context
+    assert "[2] Labels" in context and "installer.\n\n(Section" in context
 
 
 def test_build_context_respects_page_and_token_limits():
@@ -75,17 +100,19 @@ def test_build_messages_puts_question_after_sources():
 
 
 class FakeLLM:
-    def __init__(self, pieces=(), error=None):
-        self.pieces, self.error, self.messages = pieces, error, None
+    def __init__(self, pieces=(), error=None, finish="stop"):
+        self.pieces, self.error, self.messages, self.finish = pieces, error, None, finish
 
     def resolve_model(self):
         return "fake-model"
 
-    def stream_chat(self, messages, model=None):
+    def stream_chat(self, messages, model=None, info=None):
         self.messages = messages
         if self.error:
             raise LLMError(self.error)
         yield from self.pieces
+        if info is not None:
+            info["finish_reason"] = self.finish
 
 
 def test_stream_answer_event_sequence():
@@ -93,8 +120,14 @@ def test_stream_answer_event_sequence():
     events = list(stream_answer("How to install?", [page("1", "Install", ["Run it."])], llm))
     assert [e["type"] for e in events] == ["sources", "delta", "delta", "done"]
     assert events[0]["sources"][0]["title"] == "Install"
-    assert events[-1]["model"] == "fake-model"
+    assert events[-1]["model"] == "fake-model" and events[-1]["truncated"] is False
     assert "Question: How to install?" in llm.messages[1]["content"]
+
+
+def test_stream_answer_flags_truncated_and_empty_answers():
+    hits = [page("1", "A", ["t"])]
+    assert list(stream_answer("q", hits, FakeLLM(["Cut"], finish="length")))[-1]["truncated"] is True
+    assert list(stream_answer("q", hits, FakeLLM([])))[-1] == {"type": "error", "message": EMPTY_ANSWER}
 
 
 def test_stream_answer_without_results_skips_llm():
@@ -166,6 +199,13 @@ def test_status_when_server_is_down():
     assert status["available"] is False and "not reachable" in status["error"]
 
 
+def test_status_with_unexpected_model_list():
+    status = client(lambda request: httpx.Response(200, text="<html>not json</html>")).status()
+    assert status["available"] is False and "Unexpected model list" in status["error"]
+    status = client(lambda request: httpx.Response(200, json={"data": [{"name": "no id"}]})).status()
+    assert status["available"] is False
+
+
 def test_stream_chat_sends_reasoning_off_and_streams_text():
     sent = {}
 
@@ -177,7 +217,7 @@ def test_stream_chat_sends_reasoning_off_and_streams_text():
     llm = client(handler)
     assert "".join(llm.stream_chat([{"role": "user", "content": "hey"}], model="m")) == "Hi!"
     assert sent["reasoning_effort"] == "none" and sent["stream"] is True and sent["model"] == "m"
-    assert "stream_options" not in sent  # only requested together with usage
+    assert "stream_options" not in sent  # only requested together with info
 
 
 def test_stream_chat_requests_usage():
@@ -188,9 +228,9 @@ def test_stream_chat_requests_usage():
         body = "\n\n".join(sse(delta(content="Hi"), {"choices": [], "usage": {"completion_tokens": 1}}))
         return httpx.Response(200, text=body + "\n\n", headers={"content-type": "text/event-stream"})
 
-    usage = {}
-    assert "".join(client(handler).stream_chat([], model="m", usage=usage)) == "Hi"
-    assert sent["stream_options"] == {"include_usage": True} and usage == {"completion_tokens": 1}
+    info = {}
+    assert "".join(client(handler).stream_chat([], model="m", info=info)) == "Hi"
+    assert sent["stream_options"] == {"include_usage": True} and info["usage"] == {"completion_tokens": 1}
 
 
 def test_stream_chat_http_error_becomes_llm_error():

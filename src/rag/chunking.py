@@ -22,9 +22,14 @@ from pathlib import Path
 
 from rag import config
 
-HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-FENCE = re.compile(r"^\s*(```|~~~)")
+# The optional closing hashes need a space before them: "## Using C#" keeps its "#".
+HEADING = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$")
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 IMAGE_MARK = re.compile(r"\[image: [^\]]+\]")
+# Title of the space's root page; it heads every page's breadcrumbs and is dropped on load.
+ROOT_PAGE = "Home"
+# Bump when the chunking logic changes: the indexer then rebuilds (as it does when the limits change).
+CHUNKER_VERSION = 2
 
 
 def approx_tokens(text: str) -> int:
@@ -43,15 +48,17 @@ class Page:
     labels: list[str]
     body: str
 
+    def __post_init__(self) -> None:
+        self.breadcrumbs = [c for c in self.breadcrumbs if c != ROOT_PAGE]
+
     @property
     def product(self) -> str:
         """Top-level section of the space, e.g. 'Direct Print'."""
-        crumbs = [c for c in self.breadcrumbs if c != "Home"]
-        return crumbs[0] if crumbs else self.title
+        return self.breadcrumbs[0] if self.breadcrumbs else self.title
 
     @property
     def context_path(self) -> list[str]:
-        return [c for c in self.breadcrumbs if c != "Home"] + [self.title]
+        return self.breadcrumbs + [self.title]
 
 
 @dataclass
@@ -116,7 +123,18 @@ def load_page(meta_path: Path) -> Page:
 
 
 def load_pages(space_dir: Path) -> list[Page]:
-    return [load_page(p) for p in sorted((space_dir / "pages").glob("*.json"))]
+    pages = []
+    for path in sorted((space_dir / "pages").glob("*.json")):
+        try:
+            pages.append(load_page(path))
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError(f"Broken synced page {path}: {exc}; re-run the sync") from exc
+    return pages
+
+
+def chunk_settings(max_tokens: int = config.CHUNK_MAX_TOKENS, min_tokens: int = config.CHUNK_MIN_TOKENS) -> dict:
+    """What the chunks depend on besides the pages; stored with the index to detect changes."""
+    return {"version": CHUNKER_VERSION, "max_tokens": max_tokens, "min_tokens": min_tokens}
 
 
 # --- splitting -----------------------------------------------------------------
@@ -127,6 +145,34 @@ def clean_title(title: str) -> str:
     return re.sub(r"\*\*|__", "", title).strip("*_ ")
 
 
+def fence_mask(lines: list[str]) -> list[bool]:
+    """Which lines are inside a fenced code block (fence lines included).
+
+    A fence closes only on the same character, at least as long, with nothing after it. A fence that
+    never closes is not a fence: one stray ``` must not turn the rest of the page into code.
+    """
+    mask = [False] * len(lines)
+    i = 0
+    while i < len(lines):
+        m = FENCE.match(lines[i])
+        if m:
+            marker = m.group(1)
+            close = next(
+                (
+                    j for j in range(i + 1, len(lines))
+                    if (c := FENCE.match(lines[j]))
+                    and c.group(1)[0] == marker[0] and len(c.group(1)) >= len(marker) and not c.group(2).strip()
+                ),
+                None,
+            )  # fmt: skip
+            if close is not None:
+                mask[i : close + 1] = [True] * (close + 1 - i)
+                i = close + 1
+                continue
+        i += 1
+    return mask
+
+
 def has_text(section: Section) -> bool:
     return any(l.strip() and not HEADING.match(l) for l in section.content.splitlines())
 
@@ -135,16 +181,15 @@ def split_sections(body: str) -> list[Section]:
     """Split markdown into sections at headings outside fenced code blocks."""
     sections: list[Section] = []
     stack: list[tuple[int, str]] = []  # (level, title)
-    heading, lines, in_fence = "", [], False
+    heading, lines = "", []
 
     def flush() -> None:
         content = "\n".join(lines).strip("\n")
         if heading or content.strip():
             sections.append(Section([t for _, t in stack], heading, content))
 
-    for line in body.splitlines():
-        if FENCE.match(line):
-            in_fence = not in_fence
+    all_lines = body.splitlines()
+    for line, in_fence in zip(all_lines, fence_mask(all_lines)):
         match = None if in_fence else HEADING.match(line)
         if match:
             flush()
@@ -161,10 +206,9 @@ def split_sections(body: str) -> list[Section]:
 
 def split_blocks(text: str) -> list[str]:
     """Split on blank lines, keeping fenced code blocks whole."""
-    blocks, current, in_fence = [], [], False
-    for line in text.splitlines():
-        if FENCE.match(line):
-            in_fence = not in_fence
+    blocks, current = [], []
+    lines = text.splitlines()
+    for line, in_fence in zip(lines, fence_mask(lines)):
         if not line.strip() and not in_fence:
             if current:
                 blocks.append("\n".join(current))
@@ -179,15 +223,20 @@ def split_blocks(text: str) -> list[str]:
 def pack_blocks(blocks: list[str], max_tokens: int, min_tokens: int = 0) -> list[str]:
     """Greedily pack blocks into pieces up to max_tokens; an oversized block stays whole.
 
-    A trailing piece smaller than min_tokens is glued to the previous one
-    (slightly exceeding max_tokens beats a context-free fragment).
+    A heading never ends a piece: it moves on with the text it introduces. A trailing piece smaller
+    than min_tokens is glued to the previous one (slightly exceeding max_tokens beats a
+    context-free fragment).
     """
     pieces, current = [], []
     for block in blocks:
         candidate = "\n\n".join(current + [block])
-        if current and approx_tokens(candidate) > max_tokens:
+        only_headings = all(HEADING.match(b) for b in current)
+        if current and not only_headings and approx_tokens(candidate) > max_tokens:
+            carry = []
+            while len(current) > 1 and HEADING.match(current[-1]):
+                carry.insert(0, current.pop())
             pieces.append("\n\n".join(current))
-            current = [block]
+            current = carry + [block]
         else:
             current.append(block)
     if current:
@@ -205,6 +254,15 @@ def common_prefix(paths: list[list[str]]) -> list[str]:
             n += 1
         prefix = prefix[:n]
     return prefix
+
+
+def group_path(sections: list[Section]) -> list[str]:
+    """Section path of merged sections: their common path, else the path of the largest one
+    (merged siblings "## A" + "## B" have no common path, but the chunk is still mostly about one)."""
+    common = common_prefix([s.path for s in sections])
+    if common or len(sections) == 1:
+        return common
+    return max(sections, key=lambda s: approx_tokens(s.markdown)).path
 
 
 def group_sections(
@@ -229,7 +287,7 @@ def group_sections(
         if pending:
             heads = [s.markdown for s in pending]
             section = Section(
-                common_prefix([s.path for s in pending] + [section.path]),
+                group_path(pending + [section]),
                 heads[0],
                 "\n\n".join(heads[1:] + [section.markdown]),
             )
@@ -244,14 +302,16 @@ def group_sections(
             prev = groups[-1]
             prev_size = approx_tokens("\n\n".join(s.markdown for s in prev))
             small = prev_size < min_tokens or size < min_tokens
-            if small and prev_size + size <= max_tokens:
+            # a tiny section (a heading or a line, e.g. "## Related pages") is not worth a chunk
+            tiny = size < min_tokens // 2
+            if small and (prev_size + size <= max_tokens or tiny):
                 prev.append(section)
                 continue
         groups.append([section])
 
     result: list[tuple[list[str], str]] = []
     for group in groups:
-        path = common_prefix([s.path for s in group])
+        path = group_path(group)
         markdown = "\n\n".join(s.markdown for s in group)
         if approx_tokens(markdown) <= max_tokens:
             result.append((path, markdown))
@@ -288,8 +348,10 @@ def chunk_page(
 
     chunks = []
     for i, (section_path, text) in enumerate(parts):
+        # image markers carry no text: dropped once here, for the index, the UI and the LLM
+        text = re.sub(r"\n{3,}", "\n\n", IMAGE_MARK.sub("", text)).strip()
         header = context_header(page, section_path)
-        embed_text = f"{header}\n\n{IMAGE_MARK.sub('', text).strip()}"
+        embed_text = f"{header}\n\n{text}"
         chunks.append(
             Chunk(
                 chunk_id=f"{page.id}:{i}",
