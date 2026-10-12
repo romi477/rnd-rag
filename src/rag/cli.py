@@ -10,6 +10,8 @@ import typer
 from rag import config
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+module_app = typer.Typer(no_args_is_help=True, help="Odoo addons as a code corpus")
+app.add_typer(module_app, name="module")
 
 MODES = ("hybrid", "vector", "fts")  # = rag.search.MODES, without importing torch for --help
 
@@ -47,6 +49,44 @@ def open_searcher(model: str = config.EMBED_MODEL):
         return Searcher(Embedder(model))
     except RuntimeError as exc:  # no index yet
         fail(str(exc))
+
+
+@module_app.command("inspect")
+def module_inspect(
+    path: Path = typer.Argument(..., help="Addon directory (contains __manifest__.py)"),
+    ref: str = typer.Option("", help="Git ref to read instead of the working tree (tag, branch, sha)"),
+    tag_prefix: str = typer.Option("", help="Resolve the latest <prefix>-<series>.* tag instead of --ref"),
+    series: str = typer.Option("19.0", help="Odoo series for --tag-prefix"),
+    origin: str = typer.Option("connector", help="core | connector | customer"),
+    json_out: Path = typer.Option(None, "--json", help="Write all units to this JSON file"),
+) -> None:
+    """Parse an addon offline (no embeddings) and print unit counts by kind."""
+    import collections
+    import dataclasses
+    import json
+
+    from rag.sources.odoo_module import DirSource, GitSource, git_location, latest_tag, parse_module
+
+    path = path.resolve()
+    if not (path / "__manifest__.py").exists() and not ref and not tag_prefix:
+        fail(f"{path} has no __manifest__.py")
+    if tag_prefix or ref:
+        repo, prefix = git_location(path)
+        if tag_prefix:
+            ref = latest_tag(repo, tag_prefix, series) or ""
+            if not ref:
+                fail(f"no tag {tag_prefix}-{series}.* in {repo}")
+        source = GitSource(repo, ref, prefix)
+    else:
+        source = DirSource(path)
+    units = parse_module(source, path.name, origin=origin)
+    version = next((u.module_version for u in units if u.kind == "manifest"), "?")
+    typer.echo(f"{path.name} {version} ({ref or 'working tree'}): {len(units)} units")
+    for kind, n in sorted(collections.Counter(u.kind for u in units).items()):
+        typer.echo(f"  {kind:<10}{n:>5}")
+    if json_out:
+        json_out.write_text(json.dumps([{**dataclasses.asdict(u), "id": u.id} for u in units], indent=1))
+        typer.echo(f"wrote {json_out}")
 
 
 @app.command()
