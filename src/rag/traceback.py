@@ -35,6 +35,7 @@ class Frame:
     code: str = ""
     module: str = ""  # indexed module the path belongs to; "" for anything else (queue job, Odoo core, stdlib)
     rel: str = ""  # path inside the module
+    alternatives: list[tuple[str, str]] = field(default_factory=list)  # other (module, rel) readings of the path
 
 
 @dataclass
@@ -60,13 +61,22 @@ class ParsedTraceback:
         return [f for f in reversed(self.frames) if f.module]
 
 
-def resolve_module(path: str, modules: Collection[str]) -> tuple[str, str]:
-    """(module, path inside it) by the first directory that is a known module name; ("", "") if none."""
+def module_candidates(path: str, modules: Collection[str]) -> list[tuple[str, str]]:
+    """(module, path inside it) for every directory of `path` that is a known module name, the one closest to the
+    file first. More than one when a folder above the addon carries a module's name too (a repository called
+    `integration` holding `integration_shopify`), or the addon holds a folder of its own name."""
     parts = path.replace("\\", "/").split("/")
-    for i, part in enumerate(parts[:-1]):
-        if part in modules:
-            return part, "/".join(parts[i + 1 :])
-    return "", ""
+    return [(parts[i], "/".join(parts[i + 1 :])) for i in range(len(parts) - 2, -1, -1) if parts[i] in modules]
+
+
+def resolve_module(path: str, modules: Collection[str]) -> tuple[str, str]:
+    """(module, path inside it) by the directory closest to the file that is a known module name; ("", "") if none.
+
+    `/srv/integration/ext/integration_shopify/models/a.py` is `integration_shopify`, not `integration`. A path that
+    is ambiguous (`.../demo_core/demo_core/a.py`) keeps its other readings in `Frame.alternatives`: the lookup
+    in the index (`resolve_frames`) takes the first one that exists."""
+    candidates = module_candidates(path, modules)
+    return candidates[0] if candidates else ("", "")
 
 
 def split_blocks(text: str) -> list[str]:
@@ -113,8 +123,8 @@ def parse_block(block: str, modules: Collection[str]) -> ParsedTraceback:
         else:
             segment = []
         path = re.sub(r"\s+", "", m[1])
-        module, rel = resolve_module(path, modules)
-        tb.frames.append(Frame(path, int(m[2]), m[3] or "", code, module, rel))
+        (module, rel), *alternatives = module_candidates(path, modules) or [("", "")]
+        tb.frames.append(Frame(path, int(m[2]), m[3] or "", code, module, rel, alternatives))
         last_segment = segment
     tb.exception = exception_from(last_segment if matches else block.split("\n"), strict=not matches)
     codes = ERROR_CODE.findall(tb.exception.message) if tb.exception else []

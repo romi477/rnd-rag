@@ -11,8 +11,8 @@ from rag.chunking import approx_tokens
 from rag.code_store import CodeStore, identifier_words
 from rag.sources.odoo_module import CodeUnit
 
-# Bump when splitting or the row layout changes: modules added before must then be added again.
-CODE_INDEX_VERSION = 3
+# Bump when splitting, unit ids, line numbers or the row layout changes: modules added before must then be added again.
+CODE_INDEX_VERSION = 4
 PART_SUFFIX = " (part 99/99)"
 
 
@@ -25,6 +25,8 @@ def split_unit(unit: CodeUnit, max_tokens: int) -> list[CodeUnit]:
 
     The first line of `embed_text` (module > model > name) is repeated in every part. Only a method's or class header's text
     is its source lines, so only their parts get their own line ranges; other kinds keep the unit's whole range.
+    A unit whose `text` is not its `embed_text` body (a view: raw XML against its visible strings) keeps the whole `text`
+    in every part, so a hit shows the unit; `extra["whole_text"]` tells readers not to join those copies.
     """
     if approx_tokens(unit.embed_text) <= max_tokens:
         return [unit]
@@ -58,7 +60,8 @@ def split_unit(unit: CodeUnit, max_tokens: int) -> list[CodeUnit]:
             unit, line_start=start, line_end=end,
             text=text if unit.text == body else unit.text,
             embed_text=f"{header} (part {n}/{len(groups)})\n{text}",
-            extra=unit.extra | {"unit_id": unit.unit_id, "part": n, "parts": len(groups)},
+            extra=unit.extra | {"unit_id": unit.unit_id, "part": n, "parts": len(groups)}
+            | ({} if unit.text == body else {"whole_text": True}),
         ))
     return parts
 
@@ -83,17 +86,19 @@ def index_module(
     max_tokens: int = config.CODE_MAX_TOKENS,
     log: Callable[[str], None] = print,
     reset: bool = False,
+    ref: str = "",
 ) -> int:
     """Replace the rows of `module` with its units. Returns the number of rows written.
 
-    `reset` first drops every module from the index (after a version or settings change).
+    `reset` first drops every module from the index (after a version or settings change). The module's version and `ref`
+    (the git ref it was read at) are recorded in the index metadata: `sync_problems` compares them with the graph.
     """
     settings = {"code_index_version": CODE_INDEX_VERSION, "code_max_tokens": max_tokens}
     if reset or not store.exists():
         store.reset(embedder.model_name, embedder.dim)
     meta = store.meta
     others = [m for m in store.modules() if m != module]
-    if others and any(meta.get(k, v) != v for k, v in settings.items()):
+    if others and any(meta.get(k) != v for k, v in settings.items()):
         raise CodeIndexError(
             f"The code index was built with other settings ({ {k: meta.get(k) for k in settings} } vs {settings}); "
             f"re-add all modules: {', '.join(others)}"
@@ -104,4 +109,6 @@ def index_module(
     store.replace_module(module, [unit_row(p) for p in parts], vectors)
     store.rebuild_fts()
     store.write_meta(**settings)
+    if parts:
+        store.set_indexed_module(module, next((u.module_version for u in units if u.module_version), ""), ref)
     return len(parts)

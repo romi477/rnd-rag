@@ -75,12 +75,17 @@ def open_searcher(model: str = config.EMBED_MODEL):
         fail(str(exc))
 
 
-def open_module(path: Path, ref: str, tag_prefix: str, series: str):
-    """(module directory, git ref or '', file source) for the --ref / --tag-prefix options of `rag module`."""
+def open_module(path: Path, ref: str, tag_prefix: str, series: str, working_tree: bool = False):
+    """(module directory, git ref or '', file source) for the --ref / --tag-prefix / --working-tree options of
+    `rag module`. The files are read from a git ref: the checked-out files are whatever branch and edits the
+    repository has at the moment, so reading them needs the explicit --working-tree."""
     from rag.sources.odoo_module import DirSource, GitSource, git_location, latest_tag
 
     path = path.resolve()
     if not ref and not tag_prefix:
+        if not working_tree:
+            fail("Say which version to read: --ref REF (a tag, branch or sha), --tag-prefix PREFIX, or --working-tree "
+                 "for the files as checked out (they may not match any commit)")
         if not (path / "__manifest__.py").exists():
             fail(f"{path} has no __manifest__.py")
         return path, "", DirSource(path)
@@ -100,6 +105,7 @@ def module_inspect(
     series: str = typer.Option("19.0", help="Odoo series for --tag-prefix"),
     origin: str = typer.Option("connector", help="core | connector | customer"),
     json_out: Path = typer.Option(None, "--json", help="Write all units to this JSON file"),
+    working_tree: bool = typer.Option(False, "--working-tree", help="Read the files as checked out instead of a git ref"),
 ) -> None:
     """Parse an addon offline (no embeddings, graph untouched) and print unit counts by kind."""
     import collections
@@ -108,7 +114,7 @@ def module_inspect(
 
     from rag.sources.odoo_module import parse_module
 
-    path, ref, source = open_module(path, ref, tag_prefix, series)
+    path, ref, source = open_module(path, ref, tag_prefix, series, working_tree)
     units = parse_module(source, path.name, origin=origin)
     version = next((u.module_version for u in units if u.kind == "manifest"), "?")
     typer.echo(f"{path.name} {version} ({ref or 'working tree'}): {len(units)} units")
@@ -129,6 +135,7 @@ def module_add(
     index: bool = typer.Option(True, "--index/--no-index", help="Embed the units for search (needs the embedding model)"),
     model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
     reset_index: bool = typer.Option(False, help="Drop all modules from the search index first (after an index version change)"),
+    working_tree: bool = typer.Option(False, "--working-tree", help="Read the files as checked out instead of a git ref"),
 ) -> None:
     """Add (or replace) an addon in the code graph and, unless --no-index, in the code search index."""
     from rag.code_graph import CodeGraph, ModuleInfo, graph_path
@@ -137,7 +144,7 @@ def module_add(
     from rag.sources.odoo_module import parse_module
     from rag.store import store_path
 
-    path, ref, source = open_module(path, ref, tag_prefix, series)
+    path, ref, source = open_module(path, ref, tag_prefix, series, working_tree)
     units = parse_module(source, path.name, origin=origin)
     if not any(u.kind == "manifest" for u in units):
         fail(f"{path.name}: no readable __manifest__.py at {ref or 'the working tree'}")
@@ -146,7 +153,9 @@ def module_add(
     if index:
         embedder = make_embedder(model)
         try:
-            n_rows = index_module(CodeStore(store_path(embedder.model_name)), embedder, info.name, units, log=typer.echo, reset=reset_index)
+            n_rows = index_module(
+                CodeStore(store_path(embedder.model_name)), embedder, info.name, units, log=typer.echo, reset=reset_index, ref=ref
+            )
         except CodeIndexError as exc:
             fail(str(exc))
     graph.add_module(info, units)
@@ -154,14 +163,21 @@ def module_add(
     typer.echo(f"{info.name} {info.version} ({ref or 'working tree'}): {len(units)} units")
     if index:
         typer.echo(f"indexed {n_rows} rows for search")
+    else:
+        typer.secho(f"{info.name} is not in the search index: run again without --no-index before using it for answers", fg="yellow")
     if missing := graph.missing_depends(info.name):
         typer.echo(f"depends not added yet: {', '.join(missing)} (Odoo core and other repositories are expected here)")
 
 
 @module_app.command("list")
-def module_list() -> None:
-    """Modules in the code graph, dependencies first."""
+def module_list(
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+) -> None:
+    """Modules in the code graph, dependencies first; a warning where the search index and the graph differ."""
     from rag.code_graph import CodeGraph, graph_path
+    from rag.code_lookup import sync_problems
+    from rag.code_store import CodeStore
+    from rag.store import store_path
 
     graph = CodeGraph.load(graph_path())
     if not graph.modules:
@@ -170,12 +186,15 @@ def module_list() -> None:
         m = graph.modules[name]
         n_methods = sum(1 for x in graph.methods if x.module == name)
         typer.echo(f"{name:<28}{m.version:<14}{m.origin:<10}{m.ref or 'working tree':<28}{n_methods:>5} methods")
+    for name, problem in sync_problems(graph, CodeStore(store_path(model))).items():
+        typer.secho(f"{name}: {problem}", fg="yellow")
 
 
 @module_app.command("rm")
 def module_rm(
     name: str,
     model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+    force: bool = typer.Option(False, "--force", help="Remove it although other modules depend on it"),
 ) -> None:
     """Remove an addon from the code graph and the code search index."""
     from rag.code_graph import CodeGraph, graph_path
@@ -185,9 +204,13 @@ def module_rm(
     graph = CodeGraph.load(graph_path())
     if name not in graph.modules:
         fail(f"{name} is not in the graph")
+    if dependants := [m.name for m in graph.modules.values() if name in m.depends]:
+        if not force:
+            fail(f"{', '.join(dependants)} depend on {name}: their overrides and chains would lose it (--force removes it anyway)")
+        typer.secho(f"{', '.join(dependants)} depend on {name}", fg="yellow")
+    CodeStore(store_path(model)).delete_module(name)  # the index first: a failure leaves the graph, which `module list` shows
     graph.remove_module(name)
     graph.save(graph_path())
-    CodeStore(store_path(model)).delete_module(name)
     typer.echo(f"removed {name}")
 
 
@@ -242,7 +265,7 @@ def trace(
     import sys
 
     from rag.code_graph import CodeGraph, graph_path
-    from rag.code_lookup import find_error_code, related_methods, resolve_frames
+    from rag.code_lookup import find_error_code, related_methods, resolve_frames, scope_modules, sync_problems
     from rag.code_store import CodeStore
     from rag.store import store_path
     from rag.traceback import parse_traceback, semantic_query, version_note
@@ -257,9 +280,10 @@ def trace(
         fail("No traceback found in the input")
     if tb.exception:
         typer.echo(f"{tb.exception.name}: {textwrap.shorten(tb.exception.message, 200)}")
+    resolved = resolve_frames(store, tb)  # may settle a frame on another module than its path first suggests
     visible = {f.module for f in tb.own_frames}
     typer.echo(f"{len(tb.frames)} frames, {len(tb.own_frames)} in indexed modules (innermost first)")
-    for hit in resolve_frames(store, tb):
+    for hit in resolved:
         f = hit.frame
         if not hit.found:
             typer.echo(f"  {f.module}/{f.rel}:{f.line} in {f.func}: no indexed unit contains this line")
@@ -273,14 +297,18 @@ def trace(
             typer.echo(f"      abstract: {m.module}/{m.path}:{m.line_start}-{m.line_end}")
         if show_text:
             typer.echo(textwrap.indent(hit.text, "      | "))
+    scope = scope_modules(graph, visible)
     for code in tb.error_codes:
         typer.echo(f"error code {code}:")
-        for u in find_error_code(store, code) or []:
+        for u in find_error_code(store, code, scope):
             typer.echo(f"  {u.kind} {u.module}/{u.path}:{u.line_start}-{u.line_end}  {u.name}")
     versions = {m.name: m.version for m in graph.modules.values()}
+    problems = sync_problems(graph, store, visible)
     for module in sorted(visible):
         if note := version_note(client_version, versions[module]):
             typer.echo(f"{module}: {note}")
+        if module in problems:
+            typer.secho(f"{module}: the index and the graph differ ({problems[module]})", fg="yellow")
     typer.echo(f"search query: {semantic_query(tb)}")
 
 

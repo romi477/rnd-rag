@@ -1,4 +1,4 @@
-from rag.traceback import looks_like_traceback, parse_traceback, semantic_query, version_note
+from rag.traceback import looks_like_traceback, parse_traceback, resolve_module, semantic_query, version_note
 
 MODULES = {"demo_core", "demo_shop"}
 
@@ -36,10 +36,21 @@ def test_frames_resolve_to_modules_by_directory_name():
     ]
 
 
-def test_module_is_found_whatever_the_server_prefix_and_leftmost_wins():
+def test_module_is_found_whatever_the_server_prefix_and_the_closest_directory_wins():
     text = 'File "/home/odoo/src/custom/demo_core/demo_core/a.py", line 3, in f\n    x = 1\nValueError: boom\n'
     (frame,) = parse_traceback(text, MODULES).frames
-    assert (frame.module, frame.rel) == ("demo_core", "demo_core/a.py")
+    assert (frame.module, frame.rel) == ("demo_core", "a.py")
+    # the other reading stays available for the lookup in the index
+    assert frame.alternatives == [("demo_core", "demo_core/a.py")]
+
+
+def test_a_folder_above_the_addon_named_like_another_module_does_not_capture_the_frame():
+    # a repository folder called like an indexed module (here the checkout of the whole project) holds the connector
+    text = 'File "/opt/projects/demo_core/19/project/demo_shop/api/client.py", line 3, in f\n    x = 1\nValueError: boom\n'
+    (frame,) = parse_traceback(text, MODULES).frames
+    assert (frame.module, frame.rel) == ("demo_shop", "api/client.py")
+    assert resolve_module("/srv/demo_core/ext/demo_shop/models/a.py", MODULES) == ("demo_shop", "models/a.py")
+    assert resolve_module("/usr/lib/python3/json/decoder.py", MODULES) == ("", "")
 
 
 def test_exception_name_and_message():

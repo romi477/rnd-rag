@@ -6,6 +6,7 @@ from rag.chunking import approx_tokens
 from rag.code_answer import (
     Piece,
     build_code_context,
+    code_fence,
     gather,
     signature_and_doc,
     stream_code_answer,
@@ -52,6 +53,22 @@ def test_window_keeps_lines_around_the_failing_one_and_marks_the_cut():
     assert "line 10\n" not in cut and "line 90" not in cut
     assert cut.startswith("# ...") and cut.rstrip().endswith("# ...")
     assert window("a\nb", 1, 1, 5) == "a\nb"
+
+
+def test_window_of_a_line_outside_the_text_shows_the_nearest_end_not_nothing():
+    # a frame matched by function name carries the client's line number, which may be beyond or before this version
+    text = "\n".join(f"line {i}" for i in range(1, 51))  # a function at file lines 100..149
+    after = window(text, first_line=100, failing_line=400, radius=5)
+    assert "line 50" in after and "line 45" in after and "line 1\n" not in after and after.startswith("# ...")
+    before = window(text, first_line=100, failing_line=20, radius=5)
+    assert "line 1\n" in before and "line 6" in before and "line 50" not in before and before.rstrip().endswith("# ...")
+    assert window("", 1, 5, 3) == ""
+
+
+def test_window_and_signature_count_lines_like_the_parser_not_like_splitlines():
+    text = "def f(self):\n    s = 'a\u2028b'\n    return s\n" + "\n".join(f"    y{i} = {i}" for i in range(30))
+    assert "return s" in window(text, 1, 3, 1)
+    assert signature_and_doc("def f(self):\n    '''a\u2028b'''\n    return 1") == "def f(self):\n    '''a\u2028b'''\n    ..."
 
 
 # --- gather ------------------------------------------------------------------------------------------------------
@@ -140,6 +157,40 @@ def test_context_skips_what_does_not_fit_and_truncates_the_first_oversized_piece
 def test_context_drops_a_later_piece_that_does_not_fit():
     sources, _ = build_code_context([piece(1, "a = 1\n" * 300), piece(2, "b = 2\n" * 300)], max_tokens=400)
     assert [s.module for s in sources] == ["u1"]
+
+
+def test_a_fence_is_longer_than_any_backtick_run_in_the_text():
+    assert code_fence("x = 1") == "```" and code_fence("a ``` b") == "````" and code_fence("`` `````") == "``````"
+    _, context = build_code_context([piece(1, "Use:\n```\nrun\n```\nafter the block")], max_tokens=1000)
+    assert context.count("````") == 2 and "```\nrun\n```" in context
+    # the language follows the file, and a README is plain text
+    py = Piece("frame", "u", "m", "1", "models/a.py", 1, 2, "f", "x = 1")
+    xml = Piece("search", "u", "m", "1", "views/a.xml", 1, 2, "f", "<a/>")
+    rst = Piece("search", "u", "m", "1", "README.rst", 1, 2, "f", "text")
+    _, context = build_code_context([py, xml, rst], max_tokens=1000)
+    assert "```python\nx = 1\n```" in context and "```xml\n<a/>\n```" in context and "```\ntext\n```" in context
+
+
+def test_a_module_whose_index_differs_from_the_graph_gets_a_note(world):  # noqa: F811
+    graph, store = world
+    graph.modules["demo_shop"].ref = "moved"
+    ev = gather(store, graph, "", TRACEBACK, searcher=None)
+    assert any(n.startswith("demo_shop: the index and the graph differ") for n in ev.notes)
+    assert not any(n.startswith("demo_core: the index") for n in ev.notes)
+
+
+def test_error_codes_come_from_the_modules_of_the_traceback_first(world, tmp_path):  # noqa: F811
+    from test_code_graph import build
+    from test_odoo_module import REGISTRY_PY
+
+    from rag.code_index import index_module
+
+    graph, store = world
+    info, units = build(tmp_path, "demo_other", ["base"], {"exceptions.py": REGISTRY_PY.replace("unpaid invoice", "other meaning")})
+    graph.add_module(info, units)
+    index_module(store, FakeEmbedder(), "demo_other", units, max_tokens=150, log=lambda m: None, ref=info.ref)
+    ev = gather(store, graph, "", TRACEBACK, searcher=None)
+    assert {p.module for p in ev.pieces if p.role == "error code"} == {"demo_core"}
 
 
 # --- streaming ---------------------------------------------------------------------------------------------------

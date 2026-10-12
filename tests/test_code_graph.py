@@ -181,12 +181,16 @@ def test_cli_add_list_chain_adapters_rm(tmp_path, monkeypatch):
     build(tmp_path, "demo_shop", ["demo_core"], {"models/order.py": SHOP_ORDER, "api/client.py": SHOP_CLIENT})
     run = lambda *args: CliRunner().invoke(app, ["module", *args])  # noqa: E731
 
-    res = run("add", str(tmp_path / "demo_shop"), "--no-index")
+    refused = run("add", str(tmp_path / "demo_shop"), "--no-index")  # a version to read is required
+    assert refused.exit_code == 1 and "--ref" in refused.output and "--working-tree" in refused.output
+    res = run("add", str(tmp_path / "demo_shop"), "--no-index", "--working-tree")
     assert res.exit_code == 0 and "not added yet: demo_core" in res.output
-    assert run("add", str(tmp_path / "demo_core"), "--origin", "core", "--no-index").exit_code == 0
+    assert run("add", str(tmp_path / "demo_core"), "--origin", "core", "--no-index", "--working-tree").exit_code == 0
 
     listing = run("list").output
     assert "demo_core" in listing and "demo_shop" in listing and "19.0.1.0.0" in listing
+    assert "demo_shop: not in the search index" in listing  # added with --no-index
+    assert "run again without --no-index" in res.output  # `module add --no-index` says the index is not updated
 
     chain = run("chain", "sale.order", "action_sync").output
     assert chain.index("demo_core") < chain.index("demo_shop") and "super" in chain
@@ -195,9 +199,12 @@ def test_cli_add_list_chain_adapters_rm(tmp_path, monkeypatch):
     adapters = run("adapters", "get_orders").output
     assert "abstract" in adapters and "ShopClient" in adapters
 
+    blocked = run("rm", "demo_core")  # demo_shop depends on it
+    assert blocked.exit_code == 1 and "demo_shop depend on demo_core" in blocked.output
     assert run("rm", "demo_shop").exit_code == 0
     assert "demo_shop" not in run("list").output
     assert run("rm", "demo_shop").exit_code == 1
+    assert run("rm", "demo_core", "--force").exit_code == 0
 
 
 def test_cli_add_indexes_and_search_corpus_code_finds_it(tmp_path, monkeypatch):
@@ -211,13 +218,15 @@ def test_cli_add_indexes_and_search_corpus_code_finds_it(tmp_path, monkeypatch):
     build(tmp_path, "demo_core", ["base"], {"models/order.py": CORE_ORDER})
     run = lambda *args: CliRunner().invoke(cli.app, list(args))  # noqa: E731
 
-    res = run("module", "add", str(tmp_path / "demo_core"))
+    res = run("module", "add", str(tmp_path / "demo_core"), "--working-tree")
     assert res.exit_code == 0, res.output
     assert "indexed" in res.output
 
     found = run("search", "action_sync", "--corpus", "code", "--mode", "fts")
     assert found.exit_code == 0, found.output
     assert "models/order.py:7" in found.output and "demo_core" in found.output
+    listing = run("module", "list", "--model", "fake")
+    assert listing.exit_code == 0 and "demo_core" in listing.output and "search index" not in listing.output
 
     assert run("module", "rm", "demo_core", "--model", "fake").exit_code == 0
     assert "No results" in run("search", "action_sync", "--corpus", "code", "--mode", "fts").output

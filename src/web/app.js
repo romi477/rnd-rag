@@ -148,7 +148,8 @@ function readForm(tab) {
   }
   tab.llm = $("llm").checked;
   if (llmInfo.checked) tab.model = $("model").value;
-  if (languagesLoaded) tab.lang = $("lang").value;
+  // "" in a tab follows the server's default: it becomes a language only when the user picks another one.
+  if (languagesLoaded && $("lang").value !== effectiveLang(tab)) tab.lang = $("lang").value;
 }
 
 const effectiveLang = (tab) => (languages.some((l) => l.code === tab.lang) ? tab.lang : defaultLang);

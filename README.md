@@ -96,6 +96,10 @@ scripts/serve.sh      # web UI at http://127.0.0.1:8000
 | `ask.sh "question" [--no-rerank] [--lang ru]` | search + streamed LLM answer with sources in the terminal; `--lang` en, es, de, pl, ru (default `RAG_ANSWER_LANGUAGE`) |
 | `eval.sh [--misses]` | retrieval quality on `eval/queries.yaml` |
 | `bench.sh [MODEL ...] [--group G]` | compare LLMs on `eval/bench.yaml`: latency, tokens/s, answers side by side |
+| `module.sh add\|list\|rm\|chain\|adapters\|inspect ...` | code corpus (experimental): Odoo addons read from a git ref into the code graph and the code search index; see "Code corpus" |
+| `trace.sh FILE [--client-version V] [--text]` | map a failed job's traceback to the indexed code: functions, overrides, error codes |
+| `eval-traces.sh [--misses] [--no-search]` | does the evidence for each traceback of `eval/traces.yaml` contain the cause? (no LLM) |
+| `bench-traces.sh MODEL [MODEL ...] [--group G]` | compare LLMs on the failure cases, report in `data/bench/` |
 | `test.sh` | unit tests |
 
 The scripts are thin wrappers over the `rag` CLI: `uv run rag --help`.
@@ -216,7 +220,7 @@ views, data records, docs), plus a graph of dependencies and overrides. Nothing 
 only in `data/` (git-ignored).
 
 ```bash
-scripts/module.sh add /path/to/addon --ref 19.0      # read from a git ref, never the working tree; parse, graph, embed
+scripts/module.sh add /path/to/addon --ref 19.0      # read from a git ref (--working-tree: the files as checked out); parse, graph, embed
 scripts/module.sh list                               # modules in the graph, dependencies first
 scripts/module.sh chain sale.order action_confirm    # every definition of a method across modules, base first
 scripts/module.sh adapters export_inventory          # abstract adapter method and each connector's implementation
@@ -231,6 +235,11 @@ The web UI has one three-position switch per tab (Search, Browse, Code): Code ta
 `RAG_CODE_EXTERNAL_LLM=1`. `eval/traces.yaml` is git-ignored; start from `eval/traces.example.yaml`.
 
 The graph and the chains come from static analysis: a dynamic `_inherit` or a call by a string name is not seen.
+The search index and the graph are written one after the other (`--no-index` writes only the graph). The index records the
+version and git ref of each module; `module.sh list`, `/api/code/modules` and the notes of a code answer say when they
+differ for a module. After a change of the index format (`CODE_INDEX_VERSION`), `module.sh add ... --reset-index` for the
+first module and `add` for the rest rebuild it. The code searcher of a running server opens the index on first use, so
+the first `module add` needs no restart. `module.sh rm NAME` refuses while another module depends on it (`--force`).
 
 ## Evaluation
 

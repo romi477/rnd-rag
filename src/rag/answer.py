@@ -37,11 +37,14 @@ ENGLISH_RULE = "Always answer in English, like the documentation. Be concise."
 
 
 def check_language(lang: str | None = None) -> str:
-    """The language code of a request: `ru`, `RU`, `ru-RU` and `ru_RU` are Russian; nothing means the default.
-    Raises ValueError for a language that is not supported."""
-    code = (lang or "").strip().lower().replace("_", "-").split("-")[0] or config.ANSWER_LANGUAGE
+    """The language code of a request: `ru`, `RU`, `ru-RU` and `ru_RU` are Russian; nothing means the default
+    (`RAG_ANSWER_LANGUAGE`, read the same way). Raises ValueError for a language that is not supported."""
+    named = (lang or "").strip()
+    raw = named or config.ANSWER_LANGUAGE  # the configured default is written like any other code
+    code = raw.strip().lower().replace("_", "-").split("-")[0]
     if code not in config.ANSWER_LANGUAGES:
-        raise ValueError(f"Unsupported language {lang!r}, expected one of {', '.join(config.ANSWER_LANGUAGES)}")
+        source = "" if named else " (RAG_ANSWER_LANGUAGE)"
+        raise ValueError(f"Unsupported language {raw!r}{source}, expected one of {', '.join(config.ANSWER_LANGUAGES)}")
     return code
 
 

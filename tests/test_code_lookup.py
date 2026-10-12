@@ -5,7 +5,7 @@ from test_odoo_module import REGISTRY_PY
 
 from rag.code_graph import CodeGraph
 from rag.code_index import index_module
-from rag.code_lookup import find_error_code, related_methods, resolve_frames
+from rag.code_lookup import find_error_code, related_methods, resolve_frames, scope_modules, sync_problems
 from rag.code_store import CodeStore
 from rag.traceback import parse_traceback
 
@@ -31,7 +31,7 @@ def world(tmp_path):
     store.reset("fake", FakeEmbedder.dim)
     for info, units in (core, shop):
         graph.add_module(info, units)
-        index_module(store, FakeEmbedder(), info.name, units, max_tokens=150, log=lambda m: None)
+        index_module(store, FakeEmbedder(), info.name, units, max_tokens=150, log=lambda m: None, ref=info.ref)
     return graph, store
 
 
@@ -119,7 +119,7 @@ def test_same_named_units_resolve_to_the_one_nearest_the_line(world, tmp_path): 
     twice = "class A:\n    def run(self):\n        return 1\n\n\nclass B:\n    def run(self):\n        return 2\n"
     info, units = build(tmp_path, "demo_twice", ["demo_core"], {"twice.py": twice})
     graph.add_module(info, units)
-    index_module(store, FakeEmbedder(), "demo_twice", units, max_tokens=150, log=lambda m: None)
+    index_module(store, FakeEmbedder(), "demo_twice", units, max_tokens=150, log=lambda m: None, ref=info.ref)
     (hit,) = resolve_frames(store, tb(graph, ("demo_twice/twice.py", 90, "run")))
     assert hit.line_start == 7 and hit.drifted is True
 
@@ -155,6 +155,7 @@ def test_cli_trace_prints_frames_units_related_codes_and_version_note(world, tmp
     # copy the indexed rows into the CLI's store
     target = CodeStore(store_path("fake"))
     target.table.add(store.table.to_arrow())
+    target.write_meta(modules=store.indexed_modules())
     text = tmp_path / "tb.txt"
     text.write_text(
         'Traceback (most recent call last):\n  File "/opt/project/demo_shop/models/order.py", line 8, in action_sync\n'
@@ -167,3 +168,61 @@ def test_cli_trace_prints_frames_units_related_codes_and_version_note(world, tmp
     assert res.output.index("demo_core/models/order.py:7-8") < res.output.index("demo_shop/models/order.py:7-8")
     assert "E514" in res.output and "ErrorStore" in res.output
     assert "line numbers may not match" in res.output
+
+
+NESTED_PY = "def run(self):\n    return 1\n"
+
+
+def test_a_frame_path_with_two_readings_settles_on_the_one_that_is_indexed(world, tmp_path):  # noqa: F811
+    graph, store = world
+    for name, files in (("demo_flat", {"a.py": NESTED_PY}), ("demo_nest", {"demo_nest/a.py": NESTED_PY})):
+        info, units = build(tmp_path, name, ["demo_core"], files)
+        graph.add_module(info, units)
+        index_module(store, FakeEmbedder(), name, units, max_tokens=150, log=lambda m: None, ref=info.ref)
+
+    def resolve(path):
+        parsed = parse_traceback(f'File "{path}", line 2, in run\n    x\nValueError: boom\n', set(graph.modules))
+        (hit,) = resolve_frames(store, parsed)
+        return hit, parsed.own_frames[0]
+
+    # a repository folder called like the module, the module's files directly in it: the closest reading
+    hit, frame = resolve("/srv/demo_flat/demo_flat/a.py")
+    assert hit.found and (hit.module, hit.path) == ("demo_flat", "a.py") and frame.rel == "a.py"
+    # the module has a folder of its own name: the closest reading is not in the index, the other one is
+    hit, frame = resolve("/srv/demo_nest/demo_nest/a.py")
+    assert hit.found and (hit.module, hit.path) == ("demo_nest", "demo_nest/a.py")
+    assert (frame.module, frame.rel, frame.alternatives) == ("demo_nest", "demo_nest/a.py", [])  # changed in place
+    # a folder named like another module above the addon does not matter
+    hit, _ = resolve("/srv/demo_core/ext/demo_flat/a.py")
+    assert hit.found and hit.module == "demo_flat"
+    hit, _ = resolve("/srv/demo_flat/nothing.py")
+    assert not hit.found
+
+
+def test_error_code_prefers_the_modules_of_the_traceback_and_their_dependencies(world, tmp_path):  # noqa: F811
+    graph, store = world
+    other_registry = REGISTRY_PY.replace("unpaid invoice", "stock mismatch")
+    info, units = build(tmp_path, "demo_other", ["base"], {"exceptions.py": other_registry})
+    graph.add_module(info, units)
+    index_module(store, FakeEmbedder(), "demo_other", units, max_tokens=150, log=lambda m: None, ref=info.ref)
+    assert {u.module for u in find_error_code(store, "E514")} == {"demo_core", "demo_other"}
+    scope = scope_modules(graph, {"demo_shop"})
+    assert scope == {"demo_shop", "demo_core"}
+    assert {u.module for u in find_error_code(store, "E514", scope)} == {"demo_core"}
+    # nothing in the scope mentions the code: any module's units are better than none
+    assert {u.module for u in find_error_code(store, "E514", {"demo_shop"})} == {"demo_core", "demo_other"}
+
+
+def test_sync_problems_name_modules_whose_index_and_graph_differ(world, tmp_path):  # noqa: F811
+    graph, store = world
+    assert sync_problems(graph, store) == {}
+    info, units = build(tmp_path, "demo_new", ["demo_core"], {"a.py": "x = 1\n"})
+    graph.add_module(info, units)  # added with --no-index
+    assert "not in the search index" in sync_problems(graph, store)["demo_new"]
+    graph.modules["demo_shop"].ref = "other"  # the graph was updated to another ref than the rows hold
+    problems = sync_problems(graph, store, only=["demo_shop", "demo_core"])
+    assert set(problems) == {"demo_shop"} and "add the module again" in problems["demo_shop"]
+    store.delete_module("demo_core")
+    assert "demo_core" in sync_problems(graph, store)
+    graph.remove_module("demo_shop")
+    assert "not in the graph" in sync_problems(graph, store)["demo_shop"]

@@ -8,18 +8,38 @@ signature, docstring and the lines around the call, the rest until the budget is
 from __future__ import annotations
 
 import ast
+import re
 import textwrap
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
+from pathlib import PurePosixPath
 
 from rag import config
-from rag.answer import answer_in, answer_max_tokens, check_language, clean_text, language_rule, stream_llm
+from rag.answer import (
+    answer_in,
+    answer_max_tokens,
+    build_context,
+    check_language,
+    clean_text,
+    language_rule,
+    stream_llm,
+)
 from rag.chunking import approx_tokens
 from rag.code_graph import CodeGraph, MethodRef
-from rag.code_lookup import COLUMNS, FrameUnit, find_error_code, related_methods, resolve_frames, whole_unit
+from rag.code_lookup import (
+    COLUMNS,
+    FrameUnit,
+    find_error_code,
+    related_methods,
+    resolve_frames,
+    scope_modules,
+    sync_problems,
+    whole_unit,
+)
 from rag.code_search import CodeSearcher
 from rag.code_store import CodeStore
 from rag.llm import LLM
+from rag.sources.odoo_module import split_lines, unit_key
 from rag.store import sql_str
 from rag.traceback import ParsedTraceback, parse_traceback, semantic_query, version_note
 
@@ -149,7 +169,7 @@ def evidence_dict(ev: Evidence) -> dict:
 
 def signature_and_doc(text: str) -> str:
     """A function's decorators, signature and docstring with the body replaced by `...`; anything else: first lines."""
-    lines = text.splitlines()
+    lines = split_lines(text)
     try:
         node = ast.parse(textwrap.dedent(text)).body[0]
     except (SyntaxError, IndexError):
@@ -163,9 +183,12 @@ def signature_and_doc(text: str) -> str:
 
 
 def window(text: str, first_line: int, failing_line: int, radius: int) -> str:
-    """`radius` lines on each side of the failing line (`first_line` is the file line of the text's first line)."""
-    lines = text.splitlines()
-    at = failing_line - first_line
+    """`radius` lines on each side of the failing line (`first_line` is the file line of the text's first line).
+
+    A failing line outside the text (the client runs another version, so a frame matched by function name carries
+    its own line number) is moved to the nearest end: the window then shows the start or the end of the function."""
+    lines = split_lines(text)
+    at = min(max(failing_line - first_line, 0), len(lines) - 1)
     lo, hi = max(0, at - radius), min(len(lines), at + radius + 1)
     if lo == 0 and hi == len(lines):
         return text
@@ -177,7 +200,7 @@ def overlaps(pieces: list[Piece], module: str, path: str, start: int, end: int) 
 
 
 def unit_text(store: CodeStore, ref: MethodRef) -> dict | None:
-    rows = store.rows_where(f"unit_id = {sql_str(f'{ref.module}:{ref.path}:{ref.line_start}:method')}", COLUMNS)
+    rows = store.rows_where(f"unit_id = {sql_str(unit_key(ref.module, ref.path, ref.line_start, 'method'))}", COLUMNS)
     return whole_unit(rows) if rows else None
 
 
@@ -225,16 +248,20 @@ def gather(
                             role, row["unit_id"], row["module"], row["module_version"], row["path"], row["line_start"],
                             row["line_end"], f"{ref.class_name}.{ref.name}", signature_and_doc(row["text"]), ref.name,
                         ))
+        scope = scope_modules(graph, visible)
         for code in ev.tb.error_codes:
-            for u in find_error_code(store, code):
+            for u in find_error_code(store, code, scope):
                 if not overlaps(pieces, u.module, u.path, u.line_start, u.line_end):
                     pieces.append(Piece(
                         "error code", u.unit_id, u.module, u.module_version, u.path, u.line_start, u.line_end,
                         f"{code} in {u.name}", u.text[:CODE_PIECE_CHARS], u.name,
                     ))
+        problems = sync_problems(graph, store, visible)
         for module in sorted(visible):
             if note := version_note(client_version, graph.modules[module].version):
                 ev.notes.append(f"{module}: {note}")
+            if module in problems:
+                ev.notes.append(f"{module}: the index and the graph differ ({problems[module]})")
     query = " ".join(filter(None, [question.strip(), semantic_query(ev.tb) if ev.tb else ""]))
     if searcher and query:
         k = min(search_k, SEARCH_K_WITH_FRAMES) if any(fu.found for fu in ev.frames) else search_k
@@ -263,6 +290,15 @@ def frame_piece(fu: FrameUnit, role: str) -> Piece:
     )
 
 
+FENCE_LANGUAGE = {".py": "python", ".xml": "xml"}  # a README or an .rst file is plain text
+
+
+def code_fence(text: str) -> str:
+    """A fence longer than any run of backticks in `text`, so that text from a README or a comment cannot close it."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def build_code_context(pieces: list[Piece], max_tokens: int = config.CODE_CONTEXT_TOKENS) -> tuple[list[CodeSource], str]:
     """Number the pieces in order and pack them into the budget: a piece that does not fit is cut when it is
     the first or leaves room for 150 tokens, otherwise skipped (a smaller one later may still fit)."""
@@ -279,9 +315,11 @@ def build_code_context(pieces: list[Piece], max_tokens: int = config.CODE_CONTEX
         n = len(sources) + 1
         sources.append(CodeSource(n, p.role, p.module, p.module_version, p.path, p.line_start, p.line_end, p.label))
         version = f", version {p.module_version}" if p.module_version else ""
+        fence = code_fence(text)
         blocks.append(
             f"[{n}] {p.module}/{p.path}:{p.line_start}-{p.line_end}  {p.label}\n"
-            f"Role: {ROLE_TEXT.get(p.role, p.role)}{version}\n```python\n{text}\n```"
+            f"Role: {ROLE_TEXT.get(p.role, p.role)}{version}\n{fence}{FENCE_LANGUAGE.get(PurePosixPath(p.path).suffix, '')}"
+            f"\n{text}\n{fence}"
         )
     return sources, "\n\n".join(blocks)
 
@@ -317,8 +355,6 @@ def stream_code_answer(
 ) -> Iterator[dict]:
     """Events: sources -> delta* -> done, or an error event. `pages` (Confluence hits) continue the numbering;
     `lang` is the language of the answer."""
-    from rag.answer import build_context
-
     sources, context = build_code_context(ev.pieces)
     listed = [asdict(s) for s in sources]
     if pages:

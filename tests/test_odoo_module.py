@@ -8,6 +8,8 @@ from rag.sources.odoo_module import (
     GitSource,
     latest_tag,
     parse_module,
+    split_lines,
+    unit_key,
 )
 
 MANIFEST = """{
@@ -268,7 +270,7 @@ def test_cli_inspect_counts_units_and_dumps_json(module, tmp_path):
     from rag.cli import app
 
     out = tmp_path / "units.json"
-    res = CliRunner().invoke(app, ["module", "inspect", str(module), "--json", str(out)])
+    res = CliRunner().invoke(app, ["module", "inspect", str(module), "--json", str(out), "--working-tree"])
     assert res.exit_code == 0, res.output
     assert "method" in res.output and "manifest" in res.output
     dumped = json.loads(out.read_text())
@@ -287,3 +289,42 @@ def test_plain_class_with_attributes_gets_a_class_unit_up_to_its_first_method(mo
 
 def test_model_classes_get_no_class_unit(module):
     assert all(c.name != "SaleOrder" for c in by_kind(units(module), "class"))
+
+
+# --- line numbers, ids ------------------------------------------------------------------------------------------
+
+
+def test_split_lines_breaks_only_where_python_and_expat_do():
+    assert split_lines("a\nb\r\nc\rd\n") == ["a", "b", "c", "d"]
+    assert split_lines("a\x0cb\u2028c\x85d") == ["a\x0cb\u2028c\x85d"]
+    assert split_lines("") == [] and split_lines("\n") == [""] and split_lines("a\n\n") == ["a", ""]
+
+
+def test_unit_text_keeps_its_lines_after_a_form_feed_or_a_line_separator(tmp_path):
+    root = tmp_path / "demo_core"
+    write(root, "__manifest__.py", MANIFEST)
+    write(root, "a.py", "def f(self):\n    s = 'a\u2028b'\n    return s\n\x0c\n\ndef g(self):\n    return 2\n")
+    write(root, "d.xml", "<odoo>\n<record id='r1' model='x.y'>\n<field name='n'>a\u2028b</field>\n</record>\n"
+                         "<record id='r2' model='x.y'>\n<field name='n'>2</field>\n</record>\n</odoo>\n")
+    items = {(u.kind, u.name): u for u in parse_module(DirSource(root), "demo_core")}
+    assert items[("method", "g")].text == "def g(self):\n    return 2"
+    assert (items[("method", "g")].line_start, items[("method", "g")].line_end) == (6, 7)
+    assert items[("data", "r2")].text.startswith("<record id='r2'") and items[("data", "r2")].line_start == 5
+
+
+def test_units_that_start_on_the_same_line_get_distinct_ids(tmp_path):
+    root = tmp_path / "demo_core"
+    write(root, "__manifest__.py", MANIFEST)
+    write(root, "d.xml", "<odoo><record id='a' model='x.y'/><record id='b' model='x.y'/><record id='c' model='x.y'/></odoo>\n")
+    ids = [u.id for u in parse_module(DirSource(root), "demo_core") if u.kind == "data"]
+    assert len(ids) == 3 and len(set(ids)) == 3
+    assert ids[0] == unit_key("demo_core", "d.xml", 1, "data")  # the first keeps the plain id
+
+
+def test_cli_needs_a_version_to_read(module):
+    from typer.testing import CliRunner
+
+    from rag.cli import app
+
+    res = CliRunner().invoke(app, ["module", "inspect", str(module)])
+    assert res.exit_code == 1 and "--working-tree" in res.output

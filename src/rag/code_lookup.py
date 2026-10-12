@@ -7,7 +7,8 @@ No embeddings here: a frame names a file and a line, an error code names a strin
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from collections.abc import Collection
+from dataclasses import dataclass, field, replace
 
 from rag.code_graph import CodeGraph, MethodRef
 from rag.code_store import CodeStore
@@ -59,11 +60,46 @@ class Related:
     abstract: list[MethodRef] = field(default_factory=list)  # the adapter method's abstract declaration
 
 
+def scope_modules(graph: CodeGraph, modules: Collection[str]) -> set[str]:
+    """`modules` and everything they depend on among the known modules: the code that explains a failure in them."""
+    scope = set(modules)
+    for name in modules:
+        scope |= graph.depends_closure(name)
+    return scope
+
+
+def sync_problems(graph: CodeGraph, store: CodeStore, only: Collection[str] | None = None) -> dict[str, str]:
+    """Module -> what differs between the graph and the search index (empty when they agree).
+
+    `rag module add` writes the index and then the graph, `--no-index` writes only the graph: an interrupted add or
+    that flag leaves rows from another version, so the overrides and line numbers do not match the graph.
+    """
+    rows, indexed = store.modules(), store.indexed_modules()
+    problems = {}
+    for name in graph.modules if only is None else [n for n in only if n in graph.modules]:
+        info, held = graph.modules[name], indexed.get(name)
+        if name not in rows:
+            problems[name] = "not in the search index (added with --no-index?)"
+        elif held is None:
+            problems[name] = "no record of the version the search index holds: add the module again"
+        elif (held["version"], held["ref"]) != (info.version, info.ref):
+            problems[name] = (
+                f"the search index holds {held['version']} ({held['ref'] or 'working tree'}), "
+                f"the graph {info.version} ({info.ref or 'working tree'}): add the module again"
+            )
+    if only is None:
+        problems |= {name: "in the search index but not in the graph" for name in rows if name not in graph.modules}
+    return problems
+
+
 def whole_unit(rows: list[dict]) -> dict:
-    """One dict for a unit stored in parts: the parts' text joined, the range widened to the whole unit."""
+    """One dict for a unit stored in parts: the parts' text joined, the range widened to the whole unit.
+
+    A part of a unit whose text is not split (a view) holds the whole text already: it is not joined with its copies."""
     rows = sorted(rows, key=lambda r: r["part"])
+    joined = rows[0]["parts"] > 1 and not json.loads(rows[0].get("extra") or "{}").get("whole_text")
     return rows[0] | {
-        "text": "\n".join(r["text"] for r in rows) if rows[0]["parts"] > 1 else rows[0]["text"],
+        "text": "\n".join(r["text"] for r in rows) if joined else rows[0]["text"],
         "line_start": min(r["line_start"] for r in rows),
         "line_end": max(r["line_end"] for r in rows),
     }
@@ -88,35 +124,50 @@ def unit_rows_by_name(store: CodeStore, frame: Frame) -> list[dict]:
     return [whole_unit(parts) for parts in by_unit.values()]
 
 
+def resolve_frame(store: CodeStore, frame: Frame) -> FrameUnit:
+    """The unit of one frame of our own code: the one at its line, else the same-named function nearest to it."""
+    where = (
+        f"module = {sql_str(frame.module)} AND path = {sql_str(frame.rel)} AND kind IN "
+        f"({', '.join(sql_str(k) for k in CODE_KINDS)}) AND line_start <= {frame.line} AND line_end >= {frame.line}"
+    )
+    hits = store.rows_where(where, COLUMNS)
+    at_line = None
+    if hits:
+        part = min(hits, key=lambda r: r["line_end"] - r["line_start"])
+        at_line = whole_unit(store.rows_where(f"unit_id = {sql_str(part['unit_id'])}", COLUMNS))
+    if at_line and at_line["name"] == frame.func:
+        return frame_unit(frame, at_line)
+    named = unit_rows_by_name(store, frame) if frame.func else []
+    if named:
+        nearest = min(named, key=lambda r: min(abs(r["line_start"] - frame.line), abs(r["line_end"] - frame.line)))
+        return frame_unit(frame, nearest, drifted=True)
+    if at_line:
+        return frame_unit(frame, at_line)
+    return FrameUnit(frame)
+
+
 def resolve_frames(store: CodeStore, tb: ParsedTraceback) -> list[FrameUnit]:
     """The units of the traceback's own frames, innermost first; frames that match no unit have `found=False`.
 
     The line decides, unless the unit at the line is not the function the frame names: then the same-named function of
     that file nearest to the line wins (`drifted`): the client runs another version, whose lines moved. A name that
     exists nowhere in the file (a nested function such as a decorator's `wrapper`) keeps the unit at the line.
+
+    A frame whose path reads as several modules (`Frame.alternatives`) is looked up under its first reading, then
+    the others; the one that is found becomes the frame's module and path (the frame is changed in place, so the
+    traceback, the evidence and the notes agree).
     """
     out = []
     for frame in tb.own_frames:
-        where = (
-            f"module = {sql_str(frame.module)} AND path = {sql_str(frame.rel)} AND kind IN "
-            f"({', '.join(sql_str(k) for k in CODE_KINDS)}) AND line_start <= {frame.line} AND line_end >= {frame.line}"
-        )
-        hits = store.rows_where(where, COLUMNS)
-        at_line = None
-        if hits:
-            part = min(hits, key=lambda r: r["line_end"] - r["line_start"])
-            at_line = whole_unit(store.rows_where(f"unit_id = {sql_str(part['unit_id'])}", COLUMNS))
-        if at_line and at_line["name"] == frame.func:
-            out.append(frame_unit(frame, at_line))
-            continue
-        named = unit_rows_by_name(store, frame) if frame.func else []
-        if named:
-            nearest = min(named, key=lambda r: min(abs(r["line_start"] - frame.line), abs(r["line_end"] - frame.line)))
-            out.append(frame_unit(frame, nearest, drifted=True))
-        elif at_line:
-            out.append(frame_unit(frame, at_line))
-        else:
-            out.append(FrameUnit(frame))
+        fu = resolve_frame(store, frame)
+        for module, rel in [] if fu.found else frame.alternatives:
+            alt = resolve_frame(store, replace(frame, module=module, rel=rel))
+            if alt.found:
+                frame.module, frame.rel, frame.alternatives = module, rel, []
+                alt.frame = frame
+                fu = alt
+                break
+        out.append(fu)
     return out
 
 
@@ -133,7 +184,7 @@ def related_methods(graph: CodeGraph, hit: FrameUnit, visible: set[str]) -> Rela
         return (m.module, m.path, m.line_start) == (hit.module, hit.path, hit.line_start)
 
     # What the frame's module extends is always related: its base implementation explains the override.
-    allowed = visible | graph.depends_closure(hit.module) | {hit.module}
+    allowed = visible | scope_modules(graph, [hit.module])
     chain = [m for m in graph.chain(hit.model, hit.name, only=allowed) if not is_self(m)] if hit.model else []
     abstract = []
     if hit.extra.get("adapter"):
@@ -141,10 +192,17 @@ def related_methods(graph: CodeGraph, hit: FrameUnit, visible: set[str]) -> Rela
     return Related(chain, abstract)
 
 
-def find_error_code(store: CodeStore, code: str, limit: int = 8) -> list[CodeUnit]:
-    """Units that mention the code as a whole word: the registry entry (a class header) first, then raise sites."""
-    rows = store.rows_where(f"text LIKE {sql_str('%' + code + '%')}", COLUMNS)
+def find_error_code(
+    store: CodeStore, code: str, modules: Collection[str] | None = None, limit: int = 8
+) -> list[CodeUnit]:
+    """Units that mention the code as a whole word: the registry entry (a class header) first, then raise sites.
+
+    With `modules` (those of the traceback and what they depend on) only their units are returned, because connectors
+    may use the same code for different errors; when none of them mentions the code, any module's units are."""
+    rows = store.rows_where(f"text LIKE {sql_str('%' + code + '%')}", COLUMNS, limit=10000)
     rows = [r for r in rows if code in ERROR_CODE.findall(r["text"])]
+    if modules and any(r["module"] in modules for r in rows):
+        rows = [r for r in rows if r["module"] in modules]
     by_unit: dict[str, list[dict]] = {}
     for r in rows:
         by_unit.setdefault(r["unit_id"], []).append(r)

@@ -44,6 +44,28 @@ def test_modules_lists_the_graph_with_versions_and_method_counts(client):
     by_name = {m["name"]: m for m in res.json()["modules"]}
     assert by_name["demo_shop"]["version"] == "19.0.1.0.0" and by_name["demo_shop"]["ref"] == "test"
     assert by_name["demo_core"]["methods"] > 0
+    assert all(m["problem"] is None for m in by_name.values())  # the index holds what the graph describes
+
+
+def test_modules_report_a_module_whose_index_differs_from_the_graph(client):
+    graph = api.CodeGraph.load(graph_path())
+    graph.modules["demo_shop"].ref = "elsewhere"
+    graph.save(graph_path())
+    by_name = {m["name"]: m for m in client.get("/api/code/modules").json()["modules"]}
+    assert "add the module again" in by_name["demo_shop"]["problem"] and by_name["demo_core"]["problem"] is None
+
+
+def test_a_code_index_created_after_the_server_started_is_picked_up_without_a_restart(client):
+    from rag.code_store import CodeStore
+    from rag.store import store_path
+
+    api.state["code_searcher"] = None
+    api.state["searcher"].embedder = FakeEmbedder()
+    assert client.get("/api/code/modules").status_code == 503
+    CodeStore(store_path("fake")).reset("fake", FakeEmbedder.dim)  # `rag module add` in another process
+    res = client.get("/api/code/modules")
+    assert res.status_code == 200 and api.state["code_searcher"] is not None
+    assert all("not in the search index" in m["problem"] for m in res.json()["modules"])
 
 
 def test_code_search_returns_units_with_path_and_lines(client):
@@ -60,7 +82,8 @@ def test_code_search_filters_by_module_and_rejects_a_bad_mode(client):
 
 
 def test_everything_is_503_without_a_code_index(client):
-    api.state["code_searcher"] = None
+    api.state["code_searcher"] = None  # nothing opened yet, and no code index on disk for the embedder
+    api.state["searcher"].embedder = FakeEmbedder()
     assert client.get("/api/code/modules").status_code == 503
     assert client.get("/api/code/search", params={"q": "x"}).status_code == 503
     assert post(client, traceback=TRACEBACK).status_code == 503

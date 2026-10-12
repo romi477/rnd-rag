@@ -30,6 +30,18 @@ DOC_FILES = ("README.rst", "README.md", "static/description/index.html")
 TEXT_ATTRS = ("string", "help", "placeholder", "title", "confirm", "alt", "label")
 
 
+def unit_key(module: str, path: str, line_start: int, kind: str) -> str:
+    """The id of a unit: where it starts. The one place that builds it (the graph and the evidence look units up by it)."""
+    return f"{module}:{path}:{line_start}:{kind}"
+
+
+def split_lines(source: str) -> list[str]:
+    """Lines as Python's tokenizer and expat count them: only \\n, \\r\\n and \\r end a line. `str.splitlines()` also
+    splits at form feed, U+2028 and the like, which shifts every line number after such a character."""
+    lines = re.split(r"\r\n|\r|\n", source)
+    return lines[:-1] if lines and lines[-1] == "" else lines
+
+
 @dataclass
 class CodeUnit:
     kind: str  # manifest | model | class | method | view | data | doc
@@ -48,7 +60,7 @@ class CodeUnit:
     @property
     def unit_id(self) -> str:
         """Identifies the unit; the parts of a split unit share it."""
-        return self.extra.get("unit_id") or f"{self.module}:{self.path}:{self.line_start}:{self.kind}"
+        return self.extra.get("unit_id") or unit_key(self.module, self.path, self.line_start, self.kind)
 
     @property
     def id(self) -> str:
@@ -140,6 +152,18 @@ def parse_module(source: FileSource, module: str, origin: str = "connector") -> 
             units.extend(parse(module, version, origin, rel, source.read(rel)))
         except (SyntaxError, ValueError, expat.ExpatError) as e:
             log.warning("%s/%s: skipped, cannot parse: %s", module, rel, e)
+    return unique_ids(units)
+
+
+def unique_ids(units: list[CodeUnit]) -> list[CodeUnit]:
+    """Units that start on the same line and have the same kind (two records on one line of a minified XML file) would
+    share an id and overwrite each other in the index: the later ones get a counter."""
+    seen: dict[str, int] = {}
+    for u in units:
+        base = u.unit_id
+        seen[base] = seen.get(base, 0) + 1
+        if seen[base] > 1:
+            u.extra["unit_id"] = f"{base}~{seen[base]}"
     return units
 
 
@@ -255,7 +279,7 @@ def calls_super(func: ast.AST) -> bool:
 
 def python_units(module: str, version: str, origin: str, rel: str, source: str) -> list[CodeUnit]:
     tree = ast.parse(source)
-    lines = source.splitlines()
+    lines = split_lines(source)
     units: list[CodeUnit] = []
 
     def functions(body: list[ast.stmt]):
@@ -362,7 +386,7 @@ def visible_strings(node: Node, in_arch: bool = False) -> list[str]:
 
 
 def xml_units(module: str, version: str, origin: str, rel: str, source: str) -> list[CodeUnit]:
-    lines = source.splitlines()
+    lines = split_lines(source)
     units: list[CodeUnit] = []
 
     def walk(node: Node):
@@ -443,5 +467,5 @@ def doc_units(module: str, version: str, origin: str, rel: str, source: str) -> 
     if not text:
         return []
     return [CodeUnit(
-        "doc", module, version, origin, "", rel, rel, 1, len(source.splitlines()), text, f"{module} > {rel}\n{text}",
+        "doc", module, version, origin, "", rel, rel, 1, len(split_lines(source)), text, f"{module} > {rel}\n{text}",
     )]

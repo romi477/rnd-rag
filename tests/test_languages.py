@@ -45,6 +45,24 @@ def test_check_language_normalises_and_rejects_unknown_codes():
         check_language("xx")
 
 
+def test_the_configured_default_is_written_like_any_other_code(monkeypatch):
+    monkeypatch.setattr(config, "ANSWER_LANGUAGE", "ru-RU")
+    assert check_language(None) == check_language("") == "ru"
+    assert check_language("de") == "de"
+    monkeypatch.setattr(config, "ANSWER_LANGUAGE", "fr")
+    with pytest.raises(ValueError, match="'fr' \\(RAG_ANSWER_LANGUAGE\\)"):
+        check_language(None)
+    assert check_language("es") == "es"  # a request that names a language does not depend on the default
+
+
+def test_the_server_refuses_to_start_with_an_unsupported_default_language(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(config, "ANSWER_LANGUAGE", "fr")
+    with pytest.raises(ValueError, match="RAG_ANSWER_LANGUAGE"):
+        asyncio.run(api.lifespan(api.app).__aenter__())
+
+
 def test_english_prompts_are_exactly_what_they_were():
     assert system_prompt("en") == SYSTEM_PROMPT and "Always answer in English, like the documentation." in SYSTEM_PROMPT
     assert code_system_prompt("en") == CODE_SYSTEM_PROMPT and "Always answer in English." in CODE_SYSTEM_PROMPT

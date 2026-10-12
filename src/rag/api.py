@@ -21,6 +21,7 @@ from rag import config
 from rag.answer import check_language, stream_answer
 from rag.code_answer import evidence_dict, external_llm_blocked, gather, stream_code_answer
 from rag.code_graph import CodeGraph, graph_path
+from rag.code_lookup import sync_problems
 from rag.code_search import CodeSearcher
 from rag.code_store import CodeStore
 from rag.llm import LLMError, make_llm
@@ -44,12 +45,11 @@ def warm_up(searcher: Searcher) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    check_language(None)  # a bad RAG_ANSWER_LANGUAGE stops the server here, not at the first answer
     searcher = Searcher()
     state["searcher"] = searcher
     state["llm"] = make_llm()
-    # The code corpus is optional (experimental): without a code index its endpoints answer 503.
-    store = CodeStore(store_path(searcher.embedder.model_name))
-    state["code_searcher"] = CodeSearcher(searcher.embedder, store) if store.exists() else None
+    # The code corpus is optional (experimental) and may be added while the server runs: see code_searcher().
     threading.Thread(target=warm_up, args=(searcher,), daemon=True).start()
     yield
     state.clear()
@@ -177,23 +177,30 @@ def answer(
 
 
 def code_searcher() -> CodeSearcher:
+    """The code searcher, opened on first use: `rag module add` may create the code index after the server started."""
     searcher = state.get("code_searcher")
     if searcher is None:
-        raise HTTPException(503, "No code index: add modules with `rag module add`")
+        embedder = state["searcher"].embedder
+        store = CodeStore(store_path(embedder.model_name))
+        if not store.exists():
+            raise HTTPException(503, "No code index: add modules with `rag module add`")
+        searcher = state["code_searcher"] = CodeSearcher(embedder, store)
     return searcher
 
 
 @app.get("/api/code/modules")
 def code_modules() -> dict:
-    """Indexed Odoo addons: version, git ref they were read at, number of methods."""
-    code_searcher()
+    """Indexed Odoo addons: version, git ref they were read at, number of methods, and `problem` when the search
+    index does not hold the version the graph describes (null otherwise)."""
+    searcher = code_searcher()
     graph = CodeGraph.load(graph_path())
+    problems = sync_problems(graph, searcher.store)
     methods: dict[str, int] = {}
     for m in graph.methods:
         methods[m.module] = methods.get(m.module, 0) + 1
     return {"modules": [
         {"name": n, "version": graph.modules[n].version, "origin": graph.modules[n].origin,
-         "ref": graph.modules[n].ref, "methods": methods.get(n, 0)}
+         "ref": graph.modules[n].ref, "methods": methods.get(n, 0), "problem": problems.get(n)}
         for n in graph.order()
     ]}
 

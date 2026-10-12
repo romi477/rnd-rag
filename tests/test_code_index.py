@@ -78,11 +78,36 @@ def test_one_huge_line_is_cut_by_characters():
     assert len(parts) > 1 and all(approx_tokens(p.embed_text) <= 200 for p in parts)
 
 
+def test_a_unit_whose_text_is_not_its_embedded_body_keeps_the_text_whole_in_every_part():
+    strings = "\n".join(f"label number {i} help text for the field" for i in range(200))
+    raw = "<record id='v' model='ir.ui.view'>" + "x" * 50 + "</record>"
+    view = CodeUnit("view", "demo_core", "1", "connector", "res.partner", "v", "views/a.xml", 1, 300, raw,
+                    "demo_core > res.partner > v\n" + strings, {})
+    parts = split_unit(view, 100)
+    assert len(parts) > 2 and {p.text for p in parts} == {raw} and all(p.extra["whole_text"] for p in parts)
+    assert "whole_text" not in split_unit(long_method(200), 200)[0].extra  # source lines are split, not copied
+
+
 def test_generated_text_keeps_the_whole_range():
     card = unit(kind="model", name="sale.order", text="\n".join(f"- field_{i} (Char)" for i in range(300)))
     parts = split_unit(card, 200)
     assert len(parts) > 1
     assert {(p.line_start, p.line_end) for p in parts} == {(card.line_start, card.line_end)}
+
+
+def test_whole_unit_joins_split_source_but_not_copies_of_a_whole_text(store):
+    from rag.code_lookup import COLUMNS, whole_unit
+
+    strings = "\n".join(f"label number {i} help text for the field" for i in range(200))
+    raw = "<record id='v' model='ir.ui.view'>" + "x" * 50 + "</record>"
+    view = CodeUnit("view", "demo_core", "1", "connector", "res.partner", "v", "views/a.xml", 1, 3, raw,
+                    "demo_core > res.partner > v\n" + strings, {})
+    index_module(store, FakeEmbedder(), "demo_core", [view, long_method(120)], max_tokens=150, log=lambda m: None)
+    rows = lambda uid: store.rows_where(f"unit_id = '{uid}'", COLUMNS)  # noqa: E731
+    assert len(rows(view.unit_id)) > 1
+    assert whole_unit(rows(view.unit_id))["text"] == raw
+    method = long_method(120)
+    assert len(rows(method.unit_id)) > 1 and whole_unit(rows(method.unit_id))["text"] == method.text
 
 
 def test_unit_row_carries_extra_as_json_and_part_ids():
@@ -133,6 +158,20 @@ def test_reindexing_a_module_replaces_only_its_rows(indexed):
 def test_delete_module(indexed):
     indexed.delete_module("demo_shop")
     assert indexed.modules() == {"demo_core": 2}
+    assert set(indexed.indexed_modules()) == {"demo_core"}
+
+
+def test_the_version_and_ref_of_each_module_are_recorded_with_its_rows(store):
+    index_module(store, FakeEmbedder(), "demo_core", [unit()], log=lambda m: None, ref="19.0")
+    assert store.indexed_modules() == {"demo_core": {"version": "19.0.1.0.0", "ref": "19.0"}}
+    index_module(store, FakeEmbedder(), "demo_core", [unit()], log=lambda m: None, ref="19.0.2")
+    assert store.indexed_modules()["demo_core"]["ref"] == "19.0.2"
+    index_module(store, FakeEmbedder(), "demo_core", [], log=lambda m: None)  # no units: the module leaves the index
+    assert store.modules() == {} and store.indexed_modules() == {}
+
+
+def test_modules_reads_an_empty_index(store):
+    assert store.modules() == {} and CodeStore(store.path / "nothing-here").modules() == {}
 
 
 def test_vector_search_finds_by_meaning_words(indexed):
@@ -169,6 +208,12 @@ def test_parts_of_one_unit_come_back_once(store):
 def test_unknown_mode_is_a_value_error(indexed):
     with pytest.raises(ValueError):
         searcher(indexed).search("x", mode="nope")
+
+
+def test_an_index_without_recorded_settings_asks_for_a_rebuild_too(indexed):
+    indexed.meta_path.write_text('{"model": "fake", "dim": 4}')  # written before the settings were recorded
+    with pytest.raises(CodeIndexError, match="re-add"):
+        index_module(indexed, FakeEmbedder(), "demo_core", [unit()], log=lambda m: None)
 
 
 def test_changed_index_version_asks_for_a_rebuild(indexed):

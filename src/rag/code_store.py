@@ -7,7 +7,9 @@ whole module at a time, in one commit, so a running search never sees a module h
 from __future__ import annotations
 
 import json
+import logging
 import re
+from collections import Counter
 from pathlib import Path
 
 import lancedb
@@ -16,6 +18,8 @@ import pyarrow as pa
 from lancedb.index import FTS
 
 from rag.store import sql_str
+
+log = logging.getLogger(__name__)
 
 TABLE = "code_units"
 FTS_FIELD = "fts_text"  # embed_text plus the words of camelCase names; the vectors come from embed_text alone
@@ -111,11 +115,21 @@ class CodeStore:
         return self.table.count_rows() if self.exists() else 0
 
     def modules(self) -> dict[str, int]:
-        """Module name -> number of rows."""
+        """Module name -> number of rows (only the module column is read, not the vectors)."""
         if not self.exists():
             return {}
-        names = self.table.to_arrow().column("module").to_pylist()
-        return {m: names.count(m) for m in sorted(set(names))}
+        table = self.table
+        if not (n := table.count_rows()):
+            return {}
+        names = table.search().select(["module"]).limit(n).to_arrow().column("module").to_pylist()
+        return dict(sorted(Counter(names).items()))
+
+    def indexed_modules(self) -> dict[str, dict]:
+        """Module name -> {"version", "ref"} as they were when its rows were written (`code_index_meta.json`)."""
+        return self.meta.get("modules", {})
+
+    def set_indexed_module(self, module: str, version: str, ref: str) -> None:
+        self.write_meta(modules=self.indexed_modules() | {module: {"version": version, "ref": ref}})
 
     def replace_module(self, module: str, rows: list[dict], vectors: np.ndarray) -> None:
         """Replace every row of `module` with `rows`, in one commit, after checking the vectors."""
@@ -134,11 +148,17 @@ class CodeStore:
         merge.when_not_matched_by_source_delete(f"module = {sql_str(module)}").execute(data)
 
     def rows_where(self, where: str, columns: list[str], limit: int = 1000) -> list[dict]:
-        """Rows matching a SQL filter, no ranking: exact lookups by module, path, line or text."""
+        """Rows matching a SQL filter, no ranking: exact lookups by module, path, line or text. A result cut off at
+        `limit` is logged: the caller would otherwise not know rows are missing."""
         if not self.exists():
             return []
-        return self.table.search().where(where).select(columns).limit(limit).to_list()
+        rows = self.table.search().where(where).select(columns).limit(limit).to_list()
+        if len(rows) >= limit:
+            log.warning("rows_where: stopped at %d rows for %s", limit, where[:120])
+        return rows
 
     def delete_module(self, module: str) -> None:
-        if self.exists():
-            self.table.delete(f"module = {sql_str(module)}")
+        if not self.exists():
+            return
+        self.table.delete(f"module = {sql_str(module)}")
+        self.write_meta(modules={k: v for k, v in self.indexed_modules().items() if k != module})
