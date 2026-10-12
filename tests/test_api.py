@@ -3,7 +3,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from rag import api
+from rag import api, config
 from rag.llm import LLMError
 from rag.search import ChunkHit, PageHit
 
@@ -119,3 +119,40 @@ def test_unexpected_llm_failure_ends_the_stream_with_an_error(client):
 
     api.state["llm"] = Broken()
     assert events(client.get("/api/answer", params={"q": "x"}))[-1] == {"type": "error", "message": "Internal error: boom"}
+
+
+def write_synced_page(raw_dir, page_id="123", body="Intro.\n\n[image: a.png]\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"):
+    pages = raw_dir / "demo" / "pages"
+    pages.mkdir(parents=True, exist_ok=True)
+    meta = {"id": page_id, "title": "Install", "space": "demo", "url": "https://x/1", "version": 3,
+            "updated": "2026-01-02T03:04:05.000Z", "breadcrumbs": ["Home", "Printing"], "labels": ["setup"]}
+    (pages / f"{page_id}.json").write_text(json.dumps(meta))
+    (pages / f"{page_id}.md").write_text(f"---\nid: \"{page_id}\"\ntitle: \"Install\"\n---\n# Install\n\n{body}")
+
+
+def test_page_returns_the_synced_markdown_without_front_matter_and_title(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "raw")
+    write_synced_page(tmp_path / "raw")
+    res = client.get("/api/pages/123")
+    assert res.status_code == 200
+    page = res.json()
+    assert page["markdown"].startswith("Intro.") and "| A | B |" in page["markdown"] and "id:" not in page["markdown"]
+    assert (page["title"], page["url"], page["product"], page["labels"]) == ("Install", "https://x/1", "Printing", ["setup"])
+    assert page["breadcrumbs"] == ["Printing"] and page["updated"].startswith("2026-01-02")
+
+
+def test_page_is_404_when_not_synced_and_the_id_cannot_name_a_path(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "raw")
+    write_synced_page(tmp_path / "raw")
+    assert client.get("/api/pages/999").status_code == 404
+    for bad in ("..", "12a", "%2e%2e%2f%2e%2e%2fsecret", "1" * 30):
+        assert client.get(f"/api/pages/{bad}").status_code in (404, 422), bad
+    assert client.get("/api/pages/..%2f..%2fetc").status_code in (404, 422)
+
+
+def test_page_with_a_broken_synced_copy_is_a_500_with_a_hint(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "raw")
+    write_synced_page(tmp_path / "raw")
+    (tmp_path / "raw" / "demo" / "pages" / "123.json").write_text("{not json")
+    res = client.get("/api/pages/123")
+    assert res.status_code == 500 and "sync" in res.json()["detail"]

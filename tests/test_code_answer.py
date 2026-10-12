@@ -6,6 +6,7 @@ from rag.chunking import approx_tokens
 from rag.code_answer import (
     Piece,
     build_code_context,
+    build_code_messages,
     code_fence,
     gather,
     signature_and_doc,
@@ -137,6 +138,51 @@ def test_text_that_is_not_a_traceback_is_ignored(world):  # noqa: F811
     assert gather(store, graph, "", "just some words", searcher=None).pieces == []
 
 
+def test_a_function_named_in_the_question_comes_first_with_its_whole_body(world):  # noqa: F811
+    graph, store = world
+    ev = gather(store, graph, 'How does "long_one" work?', "", searcher=CodeSearcher(FakeEmbedder(), store))
+    first = ev.pieces[0]
+    assert (first.role, first.module, first.name) == ("definition", "demo_core", "long_one")
+    assert "def long_one(self):" in first.text and "value_149 = compute(self, 149)" in first.text
+    assert "return value_0" in first.text  # the end of the function: nothing was cut
+    assert first.label == "big.model.long_one"
+    assert sum(p.role == "search" for p in ev.pieces) <= 2  # the named function already points at the code
+
+
+def test_named_definitions_after_the_first_ones_are_signatures_and_a_long_one_is_cut(world, monkeypatch):  # noqa: F811
+    from rag import code_answer
+
+    graph, store = world
+    monkeypatch.setattr(code_answer, "DEFINITIONS_FULL", 1)
+    ev = gather(store, graph, "explain action_sync", "", searcher=None)
+    core, shop = [p for p in ev.pieces if p.role == "definition"]
+    assert "return True" in core.text  # the first definition in full
+    assert shop.text.endswith("    ...") and "super().action_sync()" not in shop.text  # the next one as its signature
+    monkeypatch.setattr(code_answer, "DEFINITION_MAX_TOKENS", 50)
+    (long_one,) = [p for p in gather(store, graph, "long_one", "", searcher=None).pieces if p.role == "definition"]
+    assert "value_0 = compute(self, 0)" in long_one.text and "value_149" not in long_one.text
+    assert long_one.text.endswith("(the rest of the function is not shown)")
+
+
+def test_a_named_function_that_is_a_traceback_frame_is_not_quoted_twice(world):  # noqa: F811
+    graph, store = world
+    ev = gather(store, graph, "what does action_sync do?", TRACEBACK, searcher=None)
+    spans = [(p.module, p.path, p.line_start) for p in ev.pieces]
+    assert len(spans) == len(set(spans))
+    assert not any(p.role == "definition" for p in ev.pieces)  # both definitions are the frames already
+
+
+def test_without_a_traceback_the_prompt_says_to_explain_the_code_step_by_step(world):  # noqa: F811
+    graph, store = world
+    asked = gather(store, graph, "how does long_one work?", "", searcher=None)
+    _, context = build_code_context(asked.pieces)
+    user = build_code_messages("how does long_one work?", asked, context)[1]["content"]
+    assert "No traceback was given" in user and "step by step" in user and user.endswith("Question: how does long_one work?")
+    failed = gather(store, graph, "", TRACEBACK, searcher=None)
+    _, context = build_code_context(failed.pieces)
+    assert "No traceback" not in build_code_messages("", failed, context)[1]["content"]
+
+
 # --- context and prompt ------------------------------------------------------------------------------------------
 
 
@@ -247,3 +293,14 @@ def test_search_adds_fewer_hits_when_the_frames_already_point_at_the_code(world)
     with_frames = gather(store, graph, "", TRACEBACK, searcher=searcher)
     assert sum(p.role == "search" for p in with_frames.pieces) <= SEARCH_K_WITH_FRAMES
     assert SEARCH_K_WITH_FRAMES < 6  # the default number of hits without frames
+
+
+def test_a_module_filter_still_finds_a_named_function_of_the_modules_it_depends_on(world):  # noqa: F811
+    graph, store = world
+    # long_one is defined in demo_core only; demo_shop depends on it
+    ev = gather(store, graph, "how does long_one work?", "", searcher=None, modules=["demo_shop"])
+    assert [(p.role, p.module) for p in ev.pieces] == [("definition", "demo_core")]
+    both = gather(store, graph, "how does action_sync work?", "", searcher=None, modules=["demo_shop"])
+    assert [(p.role, p.module) for p in both.pieces] == [("definition", "demo_core"), ("definition", "demo_shop")]
+    # a module that is not in the graph filters nothing in, and does not break the lookup
+    assert gather(store, graph, "how does long_one work?", "", searcher=None, modules=["nope"]).pieces == []

@@ -5,7 +5,15 @@ from test_odoo_module import REGISTRY_PY
 
 from rag.code_graph import CodeGraph
 from rag.code_index import index_module
-from rag.code_lookup import find_error_code, related_methods, resolve_frames, scope_modules, sync_problems
+from rag.code_lookup import (
+    find_error_code,
+    named_definitions,
+    names_in_question,
+    related_methods,
+    resolve_frames,
+    scope_modules,
+    sync_problems,
+)
 from rag.code_store import CodeStore
 from rag.traceback import parse_traceback
 
@@ -226,3 +234,43 @@ def test_sync_problems_name_modules_whose_index_and_graph_differ(world, tmp_path
     assert "demo_core" in sync_problems(graph, store)
     graph.remove_module("demo_shop")
     assert "not in the graph" in sync_problems(graph, store)["demo_shop"]
+
+
+# --- functions named in the question ----------------------------------------------------------------------------
+
+
+def test_names_in_question_are_quoted_snake_case_camel_case_or_dotted():
+    names = lambda q: [n for _, n in names_in_question(q)]  # noqa: E731
+    assert names('How does the "_import_one_product" method work?') == ["_import_one_product"]
+    assert names("What does import_one_product do, and ensureSettings?") == ["import_one_product", "ensureSettings"]
+    assert names("explain `create` and 'write'") == ["create", "write"]
+    assert names_in_question("what does sale.order.action_confirm do") == [("sale.order", "action_confirm")]
+    assert names_in_question("self._import_one_product") == [("self", "_import_one_product")]
+    # plain words, file names and versions are not names
+    assert names("Why does the import fail for version 19.0.2.3.0 in models.py, e.g. here?") == []
+    assert names("see integration_product_template_external.py") == []
+
+
+def test_named_definitions_find_functions_by_exact_name_base_first(world):  # noqa: F811
+    graph, _ = world
+    refs = named_definitions(graph, "how does action_sync work?")
+    assert [(r.module, r.name) for r in refs] == [("demo_core", "action_sync"), ("demo_shop", "action_sync")]
+    assert [r.module for r in named_definitions(graph, "how does action_sync work?", only={"demo_shop"})] == ["demo_shop"]
+    assert named_definitions(graph, "how does no_such_function work?") == []
+    assert named_definitions(graph, "explain the sync") == []
+
+
+def test_a_model_prefix_narrows_the_names_and_a_wrong_one_is_ignored(world):  # noqa: F811
+    graph, _ = world
+    assert [r.model for r in named_definitions(graph, "sale.order.action_sync")] == ["sale.order", "sale.order"]
+    assert len(named_definitions(graph, "self.action_sync")) == 2  # `self` is no model: any definition
+    assert len(named_definitions(graph, "self.action_sync", per_name=1)) == 1
+
+
+def test_a_name_defined_in_too_many_places_is_skipped_unless_a_model_narrows_it(world, monkeypatch):  # noqa: F811
+    from rag import code_lookup
+
+    graph, _ = world
+    monkeypatch.setattr(code_lookup, "MAX_DEFINITIONS_OF_A_NAME", 1)
+    assert named_definitions(graph, '"action_sync"') == []
+    assert len(named_definitions(graph, "sale.order.action_sync")) == 2

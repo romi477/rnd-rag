@@ -30,6 +30,7 @@ from rag.code_lookup import (
     COLUMNS,
     FrameUnit,
     find_error_code,
+    named_definitions,
     related_methods,
     resolve_frames,
     scope_modules,
@@ -91,12 +92,19 @@ ROLE_TEXT = {
     "caller": "caller frame of the traceback (signature, docstring and the lines around the call)",
     "override": "another definition of the same method",
     "abstract": "abstract declaration of the adapter method",
+    "definition": "definition of a function the question names",
     "error code": "error-code registry entry or a place that raises it",
     "search": "search result",
 }
 FRAME_MAX_TOKENS = 800  # a longer innermost frame is cut to a window around the failing line
 FRAME_WINDOW = 40  # lines on each side of the failing line
-SEARCH_K_WITH_FRAMES = 2  # search hits next to found frames: a generic message pulls in unrelated code
+SEARCH_K_WITH_FRAMES = 2  # search hits next to found frames (or named functions): a generic message pulls in unrelated code
+DEFINITIONS_FULL = 2  # named functions quoted in full (the others as signature and docstring)
+DEFINITION_MAX_TOKENS = 1500  # a longer definition is cut to its beginning
+NO_TRACEBACK_NOTE = (
+    "No traceback was given: this is a question about the code. Explain what the code does, step by step in the "
+    "order it runs, from the sources; if the part asked about is not among them, say so.\n"
+)
 CALLER_FULL_TOKENS = 150  # a shorter caller is quoted whole
 CALLER_WINDOW = 8  # lines on each side of the call in a caller
 SEARCH_PIECE_CHARS = 1200
@@ -182,6 +190,13 @@ def signature_and_doc(text: str) -> str:
     return "\n".join([*lines[:end], " " * (node.col_offset + 4) + "..."])
 
 
+def clip(text: str, max_tokens: int) -> str:
+    """The beginning of `text` up to about `max_tokens`, cut at a line end and marked."""
+    if approx_tokens(text) <= max_tokens:
+        return text
+    return text[: max_tokens * 4].rsplit("\n", 1)[0] + "\n    # ... (the rest of the function is not shown)"
+
+
 def window(text: str, first_line: int, failing_line: int, radius: int) -> str:
     """`radius` lines on each side of the failing line (`first_line` is the file line of the text's first line).
 
@@ -262,9 +277,21 @@ def gather(
                 ev.notes.append(f"{module}: {note}")
             if module in problems:
                 ev.notes.append(f"{module}: the index and the graph differ ({problems[module]})")
+    # With a module chosen, a named function is looked up in it and in what it depends on: the base module's method
+    # (`_import_one_product` of `integration` for `integration_shopify`) is part of how the chosen module behaves.
+    defined = named_definitions(graph, question, scope_modules(graph, modules) if modules else None)
+    for i, ref in enumerate(defined):
+        if overlaps(pieces, ref.module, ref.path, ref.line_start, ref.line_end) or not (row := unit_text(store, ref)):
+            continue
+        text = clip(row["text"], DEFINITION_MAX_TOKENS) if i < DEFINITIONS_FULL else signature_and_doc(row["text"])
+        owner = f"{ref.model}.{ref.name}" if ref.model else f"{ref.class_name}.{ref.name}"
+        pieces.append(Piece(
+            "definition", row["unit_id"], row["module"], row["module_version"], row["path"], row["line_start"],
+            row["line_end"], owner, text, ref.name,
+        ))
     query = " ".join(filter(None, [question.strip(), semantic_query(ev.tb) if ev.tb else ""]))
     if searcher and query:
-        k = min(search_k, SEARCH_K_WITH_FRAMES) if any(fu.found for fu in ev.frames) else search_k
+        k = min(search_k, SEARCH_K_WITH_FRAMES) if defined or any(fu.found for fu in ev.frames) else search_k
         for hit in searcher.search(query, k=k, modules=modules or None):
             if not overlaps(pieces, hit.module, hit.path, hit.line_start, hit.line_end):
                 owner = f"{hit.model}.{hit.name}" if hit.model and hit.kind == "method" else hit.name
@@ -345,7 +372,8 @@ def build_code_messages(question: str, ev: Evidence, context: str, lang: str = "
         {"role": "system", "content": code_system_prompt(lang)},
         {
             "role": "user",
-            "content": "\n\n".join(parts) + f"\n\n---\n\nQuestion: {question.strip() or DEFAULT_QUESTION}{answer_in(lang)}",
+            "content": "\n\n".join(parts)
+            + f"\n\n---\n\n{'' if ev.tb else NO_TRACEBACK_NOTE}Question: {question.strip() or DEFAULT_QUESTION}{answer_in(lang)}",
         },
     ]
 

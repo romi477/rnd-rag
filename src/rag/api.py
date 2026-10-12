@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from rag import config
 from rag.answer import check_language, stream_answer
 from rag.code_answer import evidence_dict, external_llm_blocked, gather, stream_code_answer
+from rag.chunking import load_page
 from rag.code_graph import CodeGraph, graph_path
 from rag.code_lookup import sync_problems
 from rag.code_search import CodeSearcher
@@ -291,6 +292,26 @@ def pages() -> dict:
     """Every indexed page with its Confluence link, sorted by product and path."""
     pages = state["searcher"].pages()
     return {"count": len(pages), "pages": pages}
+
+
+@app.get("/api/pages/{page_id}")
+def page(page_id: str = Path(..., pattern=r"^[0-9]{1,20}$")) -> dict:
+    """One article as the sync stored it (Markdown, without the title heading), for the Browse preview.
+
+    Read from the synced copy in `raw-data/`, not from Confluence: the server holds no Confluence token. `updated` is
+    the page's last change at the time of the sync. The id is digits only, so it cannot name another path."""
+    meta = next(iter(config.RAW_DIR.glob(f"*/pages/{page_id}.json")), None)
+    if meta is None:
+        raise HTTPException(404, f"No synced page {page_id}")
+    try:
+        found = load_page(meta)
+    except (OSError, ValueError, KeyError) as exc:
+        log.warning("Broken synced page %s: %s", meta, exc)
+        raise HTTPException(500, f"The synced copy of page {page_id} is unreadable: run the sync again") from exc
+    return {
+        "page_id": found.id, "title": found.title, "url": found.url, "breadcrumbs": found.breadcrumbs,
+        "product": found.product, "updated": found.updated, "labels": found.labels, "markdown": found.body,
+    }
 
 
 # Mounted last so that /api/* routes take precedence.

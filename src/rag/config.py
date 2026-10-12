@@ -73,7 +73,7 @@ ANSWER_LANGUAGES = {
     "es": ("Spanish", "Español"),
     "de": ("German", "Deutsch"),
     "pl": ("Polish", "Polski"),
-    "ru": ("Russian", "Русский"),
+    "ru": ("Russian", "Russian"),  # Latin script on purpose: the UI is English
 }
 ANSWER_LANGUAGE = os.environ.get("RAG_ANSWER_LANGUAGE", "en")
 # The same answer takes more tokens in other languages (Cyrillic and Polish most): the limit is multiplied by this.

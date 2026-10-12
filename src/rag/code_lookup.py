@@ -7,6 +7,7 @@ No embeddings here: a frame names a file and a line, an error code names a strin
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 
@@ -60,11 +61,48 @@ class Related:
     abstract: list[MethodRef] = field(default_factory=list)  # the adapter method's abstract declaration
 
 
+QUOTED_NAME = re.compile(r"[\"'`\u201c\u201d\u2018\u2019]([A-Za-z_][\w.]*)[\"'`\u201c\u201d\u2018\u2019]")
+DOTTED_NAME = re.compile(r"[A-Za-z_][\w.]*")
+CAMEL_NAME = re.compile(r"[a-z]+(?:[A-Z][a-z0-9]*)+")
+MAX_NAMES = 3  # names taken from one question
+MAX_DEFINITIONS_OF_A_NAME = 8  # a name defined in more places (create, write) is not a lookup unless a model narrows it
+
+
+def names_in_question(question: str) -> list[tuple[str, str]]:
+    """(model prefix, name) of what the question names as code: a quoted or backticked word, a snake_case or camelCase
+    word, `sale.order.action_confirm` (model `sale.order`). Whether such a function exists is for the graph to say."""
+    quoted = set(QUOTED_NAME.findall(question))
+    found: dict[tuple[str, str], None] = {}
+    for token in DOTTED_NAME.findall(question):
+        token = token.rstrip(".")
+        model, _, name = token.rpartition(".")
+        if name and (token in quoted or "_" in name.strip("_") or CAMEL_NAME.fullmatch(name)):
+            found.setdefault((model, name))
+    return list(found)
+
+
+def named_definitions(
+    graph: CodeGraph, question: str, only: Collection[str] | None = None, per_name: int = 3
+) -> list[MethodRef]:
+    """The definitions (base first) of the functions the question names, found by exact name: the semantic search
+    ranks the callers and neighbours of a function above the function itself, when the question is about its name.
+
+    A model prefix that matches nothing (`self.`) is ignored; a name with too many definitions and no model is skipped."""
+    refs: list[MethodRef] = []
+    for model, name in names_in_question(question)[:MAX_NAMES]:
+        found = graph.definitions(name, model, only) if model else []
+        found = found or graph.definitions(name, None, only)
+        if found and (model or len(found) <= MAX_DEFINITIONS_OF_A_NAME):
+            refs += found[:per_name]
+    return refs
+
+
 def scope_modules(graph: CodeGraph, modules: Collection[str]) -> set[str]:
     """`modules` and everything they depend on among the known modules: the code that explains a failure in them."""
     scope = set(modules)
     for name in modules:
-        scope |= graph.depends_closure(name)
+        if name in graph.modules:  # a module the user typed may not be in the graph
+            scope |= graph.depends_closure(name)
     return scope
 
 

@@ -9,6 +9,7 @@ is not in it, so every chain it returns is "as found in the source".
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -126,14 +127,19 @@ class CodeGraph:
         rank = {n: i for i, n in enumerate(self.order())}
         return sorted((m for m in self.models if m.model == model), key=lambda m: (rank[m.module], m.path, m.line_start))
 
-    def chain(self, model: str, method: str, only: set[str] | None = None) -> list[MethodRef]:
-        """Definitions of ``method`` on ``model``, base first; ``only`` limits it to the given modules."""
+    def definitions(self, method: str, model: str | None = None, only: Collection[str] | None = None) -> list[MethodRef]:
+        """Every definition of ``method`` (on ``model`` when given, any model or plain class when not), base first;
+        ``only`` limits it to the given modules."""
         rank = {n: i for i, n in enumerate(self.order())}
         found = [
             m for m in self.methods
-            if m.model == model and m.name == method and (only is None or m.module in only)
+            if m.name == method and (model is None or m.model == model) and (only is None or m.module in only)
         ]
         return sorted(found, key=lambda m: (rank[m.module], m.path, m.line_start))
+
+    def chain(self, model: str, method: str, only: Collection[str] | None = None) -> list[MethodRef]:
+        """Definitions of ``method`` on ``model``, base first; ``only`` limits it to the given modules."""
+        return self.definitions(method, model, only)
 
     def adapter_group(self, method: str) -> AdapterGroup:
         """The abstract declaration of ``method`` and its implementation in each module's adapter class."""

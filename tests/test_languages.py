@@ -34,7 +34,7 @@ LANGS = ["en", "es", "de", "pl", "ru"]
 def test_supported_languages_in_order_with_english_and_native_names():
     assert list(config.ANSWER_LANGUAGES) == LANGS
     assert config.ANSWER_LANGUAGES["es"] == ("Spanish", "Español")
-    assert config.ANSWER_LANGUAGES["ru"] == ("Russian", "Русский")
+    assert config.ANSWER_LANGUAGES["ru"] == ("Russian", "Russian")
 
 
 def test_check_language_normalises_and_rejects_unknown_codes():
@@ -126,7 +126,7 @@ def test_languages_endpoint_lists_codes_names_and_the_default(client):
     assert body["default"] == config.ANSWER_LANGUAGE
     assert [(x["code"], x["name"], x["native"]) for x in body["languages"]] == [
         ("en", "English", "English"), ("es", "Spanish", "Español"), ("de", "German", "Deutsch"),
-        ("pl", "Polish", "Polski"), ("ru", "Russian", "Русский"),
+        ("pl", "Polish", "Polski"), ("ru", "Russian", "Russian"),
     ]
 
 

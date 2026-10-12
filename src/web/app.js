@@ -26,9 +26,11 @@ const positionOf = (tab) => (tab.mode === "code" ? "code" : tab.view);
 const TRACE_MAX = 30000; // = the API limit
 const SEARCH_PLACEHOLDER = $("q").placeholder;
 const DOCS_SUBTITLE = $("subtitle").textContent;
-const CODE_PLACEHOLDER = "Optional: a question about the failure…";
+const CODE_PLACEHOLDER = "Describe the problem or paste the error… (a traceback can be added with the button)";
 const CODE_DEFAULTS = {trace: "", module: "", version: "", docs: false};
 const CODE_FIELDS = Object.keys(CODE_DEFAULTS);
+// The traceback is optional: "Add traceback" opens its panel (a small window), which collapses to its title bar.
+const TRACE_STATES = ["closed", "open", "collapsed"];
 // "Add documentation" (Confluence pages next to the code sources) is hidden: the articles are written for users and
 // rarely match an error message (see the stage notes). The API still takes `docs`; set this to true to bring it back.
 const SHOW_CODE_DOCS = false;
@@ -53,7 +55,7 @@ const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2
 // view: "search" or "browse" (the title filter of the article list is `filter`, kept apart from the query `q`).
 function newTab(init = {}) {
   return {id: newId(), mode: "docs", view: "search", q: "", filter: "", product: "", llm: false, model: "",
-          ...CODE_DEFAULTS, lang: "", data: null, answer: null, status: "", error: "", busy: false, ...init};
+          ...CODE_DEFAULTS, tracePanel: "closed", lang: "", data: null, answer: null, status: "", error: "", busy: false, ...init};
 }
 
 const activeTab = () => tabs.find((t) => t.id === activeId);
@@ -125,6 +127,8 @@ function sanitize(t) {
   tab.q = tab.q.slice(0, 500);
   tab.filter = tab.filter.slice(0, 500);
   tab.trace = tab.trace.slice(0, TRACE_MAX);
+  if (!TRACE_STATES.includes(tab.tracePanel)) tab.tracePanel = "closed";
+  if (tab.trace && tab.tracePanel === "closed") tab.tracePanel = "open"; // a traceback saved before the panel existed
   tab.version = tab.version.slice(0, 50);
   tab.llm = !!tab.llm;
   tab.docs = SHOW_CODE_DOCS && !!tab.docs; // a saved tab cannot keep a hidden option on
@@ -186,11 +190,53 @@ function updatePlaceholder(tab) {
     : pages ? `Filter ${pages.length} articles by title…` : "Filter articles by title…";
 }
 
+// What the title bar says about the traceback: its size, and when collapsed its last line (the exception).
+function traceSummary(text, collapsed) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (!lines.length) return "empty";
+  const size = `${lines.length} line${lines.length === 1 ? "" : "s"}`;
+  return collapsed ? `${size} · ${lines[lines.length - 1].trim()}` : size;
+}
+
+// The Add button while the tab has no traceback panel; the panel (open, or collapsed to its title bar) after it.
+function renderTracePanel(tab) {
+  const code = tab.mode === "code";
+  const open = tab.tracePanel === "open";
+  $("trace-add").hidden = !code || tab.tracePanel !== "closed";
+  $("trace-panel").hidden = !code || tab.tracePanel === "closed";
+  $("trace-body").hidden = !open;
+  $("trace-toggle").setAttribute("aria-expanded", String(open));
+  $("trace-toggle").title = open ? "Collapse" : "Expand";
+  $("trace-toggle").setAttribute("aria-label", open ? "Collapse the traceback" : "Expand the traceback");
+  $("trace-meta").textContent = traceSummary(tab.trace, !open);
+}
+
+function setTracePanel(state, focus = false) {
+  const tab = activeTab();
+  if (!tab) return;
+  tab.tracePanel = state;
+  renderTracePanel(tab);
+  if (focus && state === "open") $("trace").focus();
+  save();
+}
+
+// Take the traceback away: its text goes too, so the next request does not carry it.
+function removeTrace() {
+  const tab = activeTab();
+  if (!tab) return;
+  tab.trace = "";
+  $("trace").value = "";
+  setTracePanel("closed");
+  $("status").textContent = statusText(tab);
+  $("q").focus();
+}
+
 function writeForm(tab) {
   const browse = tab.view === "browse";
   fillProducts(tab);
   fillModules(tab);
   $("trace").value = tab.trace;
+  renderTracePanel(tab);
   $("client-version").value = tab.version;
   $("code-docs").checked = tab.docs;
   document.body.dataset.mode = tab.mode;
@@ -202,6 +248,7 @@ function writeForm(tab) {
   $("llm").checked = tab.llm;
   $("model").value = hasOption("model", tab.model) ? tab.model : "";
   $("lang").value = effectiveLang(tab);
+  updateLlmControls();
   for (const pos of POSITIONS) $(`pos-${pos}`).setAttribute("aria-pressed", String(positionOf(tab) === pos));
   updateSubmitLabel(tab);
 }
@@ -218,6 +265,12 @@ const submitLabel = (tab) => {
   return tab.mode === "code" ? (llm ? "Explain" : "Analyze") : (llm ? "Ask" : "Find");
 };
 
+// The model and the answer language matter only when the LLM writes the answer: without it they are read-only.
+function updateLlmControls() {
+  $("llm").disabled = !llmInfo.available;
+  $("model").disabled = $("lang").disabled = !(llmInfo.available && $("llm").checked);
+}
+
 function updateSubmitLabel(tab) {
   $("submit").textContent = submitLabel(tab);
 }
@@ -231,6 +284,7 @@ function onSettingsChange() {
   const tab = activeTab();
   if (!tab) return;
   readForm(tab);
+  updateLlmControls();
   updateSubmitLabel(tab);
   $("status").textContent = statusText(tab);
   if (tab.view === "browse") renderBrowse(tab); // the product narrows the article list
@@ -418,7 +472,7 @@ function card(p, ts, open, rank) {
 // A page source has a title; a code source is named by where it is.
 const sourceTitle = (src) => src.title || `${src.module}/${src.path}:${src.line_start}-${src.line_end}`;
 
-function inlineMd(text, sources) {
+function inlineMd(text, sources, article = false) {
   // Code spans first, into placeholders: their content is literal (no *emphasis*, no [n] links).
   const codes = [];
   const html = escapeHtml(text.replace(/\$?\\(?:long)?(?:right)?arrow\$?|\$\\to\$/gi, "→"))
@@ -427,6 +481,11 @@ function inlineMd(text, sources) {
     // *em*: opens after a space or line start, closes before a space or punctuation, so that
     // "*.pdf and *.xml" stays as typed
     .replace(/(^|[\s(])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?=[\s.,;:!?)]|$)/g, "$1<em>$2</em>")
+    // An article (the Browse preview): the sync leaves "[image: name.png]" where a picture was, and keeps its links.
+    .replace(/\[image: ([^\]\n]+)\]/g, (m, name) => article ? `<span class="img-ph">image: ${name}</span>` : m)
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, label, url) =>
+      article ? `<a href="${url}" target="_blank" rel="noopener">${label}</a>` : m)
+    .replace(/&lt;(https?:\/\/[^\s&]+)&gt;/g, (m, url) => article ? `<a href="${url}" target="_blank" rel="noopener">${url}</a>` : m)
     .replace(/\[(?:sources?\s*:?\s*)?(\d+)\]/gi, (m, n) => {  // small models write "[Source 3]"
       const src = sources[n - 1];
       return src ? `<a class="cite" href="#src-${n}" title="${escapeHtml(sourceTitle(src))}">${n}</a>` : m;
@@ -434,17 +493,29 @@ function inlineMd(text, sources) {
   return html.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[i]}</code>`);
 }
 
+// A pipe table: the first row is the header when the second is the "| --- | --- |" separator.
+function tableHtml(rows, sources) {
+  const cells = (row) => row.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((c) => inlineMd(c.trim().replace(/\\\|/g, "|"), sources, true));
+  const head = rows.length > 1 && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(rows[1]);
+  const tr = (row, tag) => `<tr>${cells(row).map((c) => `<${tag}>${c}</${tag}>`).join("")}</tr>`;
+  return `<div class="table-wrap"><table>${head ? `<thead>${tr(rows[0], "th")}</thead>` : ""}<tbody>${
+    rows.slice(head ? 2 : 0).map((r) => tr(r, "td")).join("")}</tbody></table></div>`;
+}
+
 // Block markdown for LLM output: paragraphs, headings, fenced code, nested bullet / numbered lists.
 // A blank line between list items doesn't end the list (models often write "1. …\n\n2. …").
-function renderMarkdown(text, sources) {
+// `article`: an article of the documentation (the Browse preview) also has heading levels, tables, quotes, rules and links.
+function renderMarkdown(text, sources, article = false) {
   let html = "", para = [], fence = null, code = [];
   const lists = []; // open lists, innermost last: {tag, indent}
-  const flushPara = () => { if (para.length) { html += `<p>${inlineMd(para.join(" "), sources)}</p>`; para = []; } };
+  const flushPara = () => { if (para.length) { html += `<p>${inlineMd(para.join(" "), sources, article)}</p>`; para = []; } };
   const closeLists = (indent = -1) => {
     while (lists.length && lists.at(-1).indent > indent) html += `</li></${lists.pop().tag}>`;
   };
   // Some models answer with CRLF: a "\r" left at the end of a line would defeat the "$" of the patterns below.
-  for (const line of text.split(/\r?\n/)) {
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (fence) {
       if (line.trim().startsWith(fence) && !line.trim().slice(fence.length).trim()) {
         html += `<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`;
@@ -455,6 +526,17 @@ function renderMarkdown(text, sources) {
     let m;
     if ((m = line.match(/^\s*(`{3,}|~{3,})/))) { flushPara(); closeLists(); fence = m[1]; continue; }
     if (!line.trim()) { flushPara(); continue; }
+    if (article && /^\s*\|/.test(line)) {
+      const rows = [line];
+      while (i + 1 < lines.length && /^\s*\|/.test(lines[i + 1])) rows.push(lines[++i]);
+      flushPara(); closeLists(); html += tableHtml(rows, sources); continue;
+    }
+    if (article && line.startsWith(">")) {
+      const quote = [line.replace(/^>\s?/, "")];
+      while (i + 1 < lines.length && lines[i + 1].startsWith(">")) quote.push(lines[++i].replace(/^>\s?/, ""));
+      flushPara(); closeLists(); html += `<blockquote>${renderMarkdown(quote.join("\n"), sources, true)}</blockquote>`; continue;
+    }
+    if (article && /^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flushPara(); closeLists(); html += "<hr>"; continue; }
     if ((m = line.match(/^(\s*)([-*•]|(\d+)[.)])\s+(.*)$/))) {
       flushPara();
       const indent = m[1].replace(/\t/g, "    ").length, tag = m[3] ? "ol" : "ul";
@@ -467,11 +549,14 @@ function renderMarkdown(text, sources) {
         html += `<${tag}${start}><li>`;
         lists.push({tag, indent});
       }
-      html += inlineMd(m[4], sources);
+      html += inlineMd(m[4], sources, article);
       continue;
     }
-    if ((m = line.match(/^#{1,6}\s+(.*)$/))) { flushPara(); closeLists(); html += `<h3>${inlineMd(m[1], sources)}</h3>`; continue; }
-    if (lists.length && /^\s/.test(line)) { html += " " + inlineMd(line.trim(), sources); continue; } // item continues
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+      const level = article ? m[1].length : 3; // an answer keeps one heading size
+      flushPara(); closeLists(); html += `<h${level}>${inlineMd(m[2], sources, article)}</h${level}>`; continue;
+    }
+    if (lists.length && /^\s/.test(line)) { html += " " + inlineMd(line.trim(), sources, article); continue; } // item continues
     closeLists();
     para.push(line.trim());
   }
@@ -584,10 +669,11 @@ function renderView() {
 // --- Code mode: what a traceback maps to in the code of the modules ---------------------------
 
 const ROLE_LABEL = {frame: "failing frame", caller: "caller", override: "also defined here", abstract: "abstract declaration",
+  definition: "named in the question",
   "error code": "error code", search: "search"};
 const HINT_CODE = `<div class="hint-empty">
   <div>Explain a failed job from its traceback.</div>
-  <div class="hint">Paste the traceback of a <code>queue.job</code> above (a question is optional). The frames are looked up in the code of the indexed modules.</div>
+  <div class="hint">Describe the problem above, or press <b>Add traceback</b> and paste the traceback of a <code>queue.job</code>: either is enough, both is best. The frames of the traceback are looked up in the code of the indexed modules.</div>
   <div class="hint">Turn on "Answer with LLM" to get an explanation with references to the code.</div>
 </div>`;
 
@@ -681,6 +767,8 @@ function groupPages(list, product, filter) {
   return {count, groups};
 }
 
+const EYE_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+
 function renderBrowse(tab) {
   if (!pages) {
     $("browse-count").textContent = "";
@@ -695,11 +783,52 @@ function renderBrowse(tab) {
       <ul>${g.items.map(({p, title}) => {
         const href = safeUrl(p.url);
         const date = p.updated ? new Date(p.updated).toLocaleDateString() : "";
-        return `<li class="page">${href
+        return `<li class="page">
+          <button type="button" class="icon-btn preview-btn" data-preview="${escapeHtml(p.page_id)}" title="Preview the article" aria-label="Preview: ${escapeHtml(p.title)}">${EYE_ICON}</button>${href
           ? `<a class="page-title" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="Open in Confluence">${title}</a>`
           : `<span class="page-title">${title}</span>`}${date ? `<span class="page-date">${escapeHtml(date)}</span>` : ""}</li>`;
       }).join("")}</ul>
     </section>`).join("") : '<div class="empty">No article title matches. Clear the filter or choose another product.</div>';
+}
+
+// --- Browse preview: the article in a window over the blurred page ----------------------------------
+
+const articles = new Map(); // page_id -> the article as /api/pages/{id} returned it: fetched once
+let previewController = null;
+let previewTrigger = null; // the Preview button that opened the window
+
+function showPreviewHead(meta) {
+  $("preview-title").textContent = meta?.title || "";
+  $("preview-crumbs").textContent = (meta?.breadcrumbs || []).join(" › ") || meta?.product || "";
+  $("preview-meta").textContent = meta?.updated ? `Updated ${new Date(meta.updated).toLocaleDateString()}` : "";
+  const href = safeUrl(meta?.url);
+  $("preview-open").hidden = !href;
+  if (href) $("preview-open").href = href;
+}
+
+async function openPreview(id) {
+  showPreviewHead(pages?.find((p) => p.page_id === id)); // the list already knows the title, the text follows
+  $("preview-body").innerHTML = '<div class="empty">Loading the article…</div>';
+  const dialog = $("preview");
+  if (!dialog.open) dialog.showModal();
+  $("preview-body").scrollTop = 0;
+  $("preview-body").focus(); // the arrow keys and Page Down scroll the text
+  previewController?.abort();
+  const controller = previewController = new AbortController();
+  try {
+    if (!articles.has(id)) {
+      const res = await fetch(`/api/pages/${encodeURIComponent(id)}`, {signal: controller.signal});
+      if (!res.ok) throw await httpError(res);
+      articles.set(id, await res.json());
+    }
+    const article = articles.get(id);
+    showPreviewHead(article);
+    $("preview-body").innerHTML = renderMarkdown(article.markdown, [], true) || '<div class="empty">The article has no text.</div>';
+  } catch (err) {
+    if (controller.signal.aborted) return; // closed meanwhile
+    $("preview-body").innerHTML = `<div class="empty">Could not load the article: ${escapeHtml(err.message)}
+      <button type="button" class="secondary" data-preview-retry="${escapeHtml(id)}">Retry</button></div>`;
+  }
 }
 
 // The article list and the product list load once; a failed load is retried when they are needed again.
@@ -778,7 +907,7 @@ function setMode(mode) {
   if (mode === "code") loadCodeModules(); else loadProducts();
   renderView();
   save();
-  $(mode === "code" ? "trace" : "q").focus();
+  $("q").focus();
 }
 
 // The three-position switch: Code is a mode of its own, Search and Browse are the views of the documentation mode.
@@ -875,9 +1004,10 @@ function clearResults() {
   }
   controllers[tab.id]?.abort();
   delete controllers[tab.id];
-  Object.assign(tab, {q: "", trace: "", data: null, answer: null, status: "", error: "", busy: false, open: {}});
+  Object.assign(tab, {q: "", trace: "", tracePanel: "closed", data: null, answer: null, status: "", error: "", busy: false, open: {}});
   $("q").value = "";
   $("trace").value = "";
+  renderTracePanel(tab);
   renderTabs();
   renderContent(tab);
   updateUrl(tab);
@@ -990,7 +1120,11 @@ async function run() {
   if (!tab || tab.view === "browse") return; // Browse filters as the user types: Enter has nothing to run
   readForm(tab);
   const code = tab.mode === "code";
-  if (code ? !tab.q && !tab.trace.trim() : !tab.q) return;
+  if (code && !tab.q && !tab.trace.trim()) {  // nothing to analyse yet: offer the traceback box
+    if (tab.tracePanel === "closed") setTracePanel("open", true);
+    return;
+  }
+  if (!code && !tab.q) return;
   if (code) loadCodeModules(); else loadProducts(); // retried here if the first load failed
   const useLlm = tab.llm && llmInfo.available;
   const params = new URLSearchParams({q: tab.q, ...SEARCH_PARAMS});
@@ -1040,7 +1174,7 @@ async function refreshLlmStatus() {
   $("model").innerHTML = `<option value="">Default (${escapeHtml(llmInfo.model || "none")})</option>` +
     llmInfo.models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${m.loaded === false ? " (not loaded)" : ""}</option>`).join("");
   $("model").value = [...$("model").options].some((o) => o.value === selected) ? selected : "";
-  $("llm").disabled = $("model").disabled = $("lang").disabled = !llmInfo.available;
+  updateLlmControls();
   // With the Claude API the question and the doc excerpts leave this machine: say so where the switch is.
   const external = llmInfo.provider === "anthropic";
   $("llm-provider").hidden = !external;
@@ -1122,24 +1256,49 @@ $("trace").addEventListener("input", () => {  // saved without the settings roun
   const tab = activeTab();
   if (!tab) return;
   tab.trace = $("trace").value.slice(0, TRACE_MAX);
+  renderTracePanel(tab);
   $("status").textContent = statusText(tab);
   saveSoon();
 });
+$("trace-add").addEventListener("click", () => setTracePanel("open", true));
+$("trace-toggle").addEventListener("click", () => setTracePanel(activeTab()?.tracePanel === "open" ? "collapsed" : "open", true));
+$("trace-remove").addEventListener("click", removeTrace);
 $("trace").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run(); }
 });
-// A traceback pasted into the documentation search box (it holds 500 characters) opens Code mode with it.
+// A traceback pasted into the question box (it holds 500 characters) goes to the traceback panel instead; in the
+// documentation search it opens Code mode with it.
 $("q").addEventListener("paste", (e) => {
   const tab = activeTab();
   const text = e.clipboardData?.getData("text") || "";
-  if (!tab || tab.mode !== "docs" || tab.view !== "search" || !looksLikeTraceback(text)) return;
+  const docs = tab?.mode === "docs" && tab.view === "search";
+  if (!tab || !(docs || tab.mode === "code") || !looksLikeTraceback(text)) return;
   e.preventDefault();
-  setMode("code");
+  if (docs) setMode("code");
   tab.trace = text.slice(0, TRACE_MAX);
-  tab.status = "That looks like a traceback: opened in Code mode.";
+  tab.tracePanel = "open";
+  tab.status = docs ? "That looks like a traceback: opened in Code mode." : "That looks like a traceback: added as the traceback.";
   $("trace").value = tab.trace;
+  renderTracePanel(tab);
   renderContent(tab);
   save();
+});
+$("browse").addEventListener("click", (e) => {
+  const button = e.target.closest("[data-preview]");
+  if (!button) return;
+  previewTrigger = button; // focus goes back to it when the window closes (Safari does not focus a clicked button)
+  openPreview(button.dataset.preview);
+});
+$("preview-body").addEventListener("click", (e) => {
+  const retry = e.target.closest("[data-preview-retry]");
+  if (retry) openPreview(retry.dataset.previewRetry);
+});
+$("preview-close").addEventListener("click", () => $("preview").close());
+$("preview").addEventListener("click", (e) => { if (e.target === $("preview")) $("preview").close(); }); // the blurred backdrop
+$("preview").addEventListener("close", () => {
+  previewController?.abort();
+  previewController = null;
+  if (previewTrigger?.isConnected) previewTrigger.focus();
 });
 $("results").addEventListener("click", (e) => {
   if (!e.target.closest("[data-browse]")) return;
@@ -1234,7 +1393,19 @@ $("refresh-models").addEventListener("click", async () => {
     button.classList.remove("spinning");
   }
 });
+// Keyboard: F1 / F2 / F3 jump to Search / Browse / Code; Ctrl+Alt+Left / Right step through them (wrapping round). These
+// do not clash with editing a text field, where plain arrows and Alt / Option + arrows move the caret by character / word.
+const POSITION_KEYS = {F1: "search", F2: "browse", F3: "code"};
 document.addEventListener("keydown", (e) => {
-  if (e.key === "/" && document.activeElement !== $("q")) { e.preventDefault(); $("q").focus(); }
+  if ($("preview").open) return; // the window is modal: Esc closes it, nothing else reaches the page behind it
+  // "/" focuses the question box, except where it is a character being typed (a path in the traceback, a version)
+  if (e.key === "/" && !e.target.closest("input, textarea, select, [contenteditable]")) { e.preventDefault(); $("q").focus(); return; }
+  if (e.repeat || e.isComposing) return;
+  const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
+  const step = e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey ? {ArrowLeft: -1, ArrowRight: 1}[e.key] : 0;
+  const pos = plain ? POSITION_KEYS[e.key] : step ? POSITIONS[(POSITIONS.indexOf(positionOf(activeTab())) + step + POSITIONS.length) % POSITIONS.length] : null;
+  if (!pos || !activeTab()) return;
+  e.preventDefault(); // F1 would open the browser's help, the arrows may move a window or a desktop
+  setPosition(pos);
 });
 init();

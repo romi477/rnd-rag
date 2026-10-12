@@ -17,10 +17,10 @@
   <header class="top">
     <h1>Docs Search <span id="subtitle">· R&amp;D Products Documentation</span></h1>
     <!-- One switch, three positions, per tab: Search and Browse work on the documentation, Code explains a failed job from its traceback. -->
-    <div class="view-switch" role="group" aria-label="View">
-      <button type="button" id="pos-search" aria-pressed="true" title="Search the product documentation">Search</button>
-      <button type="button" id="pos-browse" aria-pressed="false" title="All articles of the documentation">Browse</button>
-      <button type="button" id="pos-code" aria-pressed="false" title="Explain a failed job from its traceback and the code of the modules (experimental)">Code</button>
+    <div class="view-switch" role="group" aria-label="View" title="Switch with F1 / F2 / F3, or step with Ctrl+Alt+Left / Right">
+      <button type="button" id="pos-search" aria-pressed="true" title="Search the product documentation (F1)">Search</button>
+      <button type="button" id="pos-browse" aria-pressed="false" title="All articles of the documentation (F2)">Browse</button>
+      <button type="button" id="pos-code" aria-pressed="false" title="Explain a failed job from its traceback and the code of the modules (experimental) (F3)">Code</button>
     </div>
     <div class="tools">
       <button type="button" id="clear" class="icon-btn" title="Clear search" aria-label="Clear search">
@@ -42,24 +42,46 @@
   </header>
   <nav id="tabs" class="tabs" role="tablist" aria-label="Searches"></nav>
   <form id="form">
-    <input id="q" type="search" maxlength="500" placeholder="Ask about connectors, Direct Print, labels…  (press / to focus)" autocomplete="off" autofocus>
+    <div class="q-row">
+      <input id="q" type="search" maxlength="500" placeholder="Ask about connectors, Direct Print, labels…  (press / to focus)" autocomplete="off" autofocus>
+      <!-- Code mode: the traceback is optional, a described problem is enough. The button opens the panel below. -->
+      <button type="button" id="trace-add" class="secondary code-only" title="Add the traceback of a failed job (queue.job exc_info)" aria-label="Add traceback">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        <span>Add traceback</span>
+      </button>
+    </div>
     <div class="actions search-only">
       <button type="button" id="stop" class="secondary" hidden>Stop</button>
       <!-- Never disabled: an Enter pressed right after typing must still submit; run() ignores an empty query. -->
       <button type="submit" id="submit">Find</button>
     </div>
-    <textarea id="trace" class="code-only" rows="5" maxlength="30000" spellcheck="false" aria-label="Traceback"
-      placeholder="Paste the traceback of a failed job (queue.job exc_info). Optional: a question above."></textarea>
+    <!-- The traceback of the tab: a small window that collapses to its title bar (state: tab.tracePanel). -->
+    <section id="trace-panel" class="trace-panel code-only" aria-label="Traceback" hidden>
+      <header class="trace-bar">
+        <span class="trace-title">Traceback</span>
+        <span id="trace-meta" class="trace-meta"></span>
+        <button type="button" id="trace-toggle" class="icon-btn" aria-expanded="true" aria-controls="trace-body" title="Collapse" aria-label="Collapse the traceback">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <button type="button" id="trace-remove" class="icon-btn" title="Remove the traceback" aria-label="Remove the traceback">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </header>
+      <div id="trace-body" class="trace-body">
+        <textarea id="trace" rows="7" maxlength="30000" spellcheck="false" aria-label="Traceback text"
+          placeholder="Paste the traceback of a failed job (queue.job exc_info)"></textarea>
+      </div>
+    </section>
     <div class="filters">
       <label class="docs-only" title="Search only the pages of one product (a top-level section of the documentation).">Product <select id="product"><option value="">All</option></select></label>
-      <label class="code-only" title="Search the code only in one module (frames of the traceback are always looked up).">Module <select id="code-module"><option value="">All</option></select></label>
+      <label class="code-only" title="Search the code only in one module. A function named in the question is also looked up in the modules this one depends on; frames of the traceback are always looked up.">Module <select id="code-module"><option value="">All</option></select></label>
       <label class="code-only" title="Module version on the client's server: a different version from the indexed one is flagged, as line numbers may not match.">Client version <input id="client-version" type="text" size="10" maxlength="50" placeholder="19.0.2.3.0" autocomplete="off"></label>
       <label class="code-only" title="Also quote the Confluence pages that match the error message."><input type="checkbox" id="code-docs"> Add documentation</label>
       <span id="browse-count" class="browse-only"></span>
       <span class="llm-group search-only">
         <label id="llm-label" title="Also write an answer from the top pages with the LLM (local LM Studio or the Claude API, set on the server), citing them as [n]. Check the answer against the cited sources."><input type="checkbox" id="llm"> Answer with LLM<span id="llm-provider" class="llm-provider" hidden>via Claude API</span></label>
-        <select id="model" aria-label="LLM model" title="The LLM that writes the answer. Default: the model set on the server (in LM Studio: the loaded one). Models marked (not loaded) are loaded by LM Studio on first use, which takes a while."><option value="">Default</option></select>
-        <select id="lang" aria-label="Answer language" title="The language of the LLM answer. The sources stay in English; menu paths, settings and code are quoted as they are."><option value="en">English</option></select>
+        <select id="model" aria-label="LLM model" title="The LLM that writes the answer (turn on Answer with LLM to change it). Default: the model set on the server (in LM Studio: the loaded one). Models marked (not loaded) are loaded by LM Studio on first use, which takes a while."><option value="">Default</option></select>
+        <select id="lang" aria-label="Answer language" title="The language of the LLM answer (turn on Answer with LLM to change it). The sources stay in English; menu paths, settings and code are quoted as they are."><option value="en">English</option></select>
         <button type="button" id="refresh-models" class="icon-btn" title="Refresh the model list (and, with LM Studio, which models are loaded)" aria-label="Refresh the model list">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>
@@ -75,6 +97,21 @@
   <div id="results"></div>
   <div id="browse"></div>
 </main>
+<!-- Browse: the article of a row, fetched when its Preview button is pressed; the page behind it is blurred. -->
+<dialog id="preview" class="preview" aria-labelledby="preview-title">
+  <header class="preview-bar">
+    <div class="preview-heading">
+      <div id="preview-crumbs" class="crumbs"></div>
+      <h2 id="preview-title"></h2>
+      <div id="preview-meta" class="meta"></div>
+    </div>
+    <a id="preview-open" class="preview-open" target="_blank" rel="noopener" title="Open the original article in Confluence" hidden>Open in Confluence ↗</a>
+    <button type="button" id="preview-close" class="icon-btn" title="Close (Esc)" aria-label="Close the preview">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+    </button>
+  </header>
+  <div id="preview-body" class="preview-body article" tabindex="-1"></div>
+</dialog>
 <script src="app.js"></script>
 </body>
 </html>

@@ -44,9 +44,15 @@ English: questions in the other languages are searched by the multilingual embed
 Only the button runs a query: it reads "Find", or "Ask" when "Answer with LLM" is on, and "Stop"
 next to it cancels a running request (what has streamed so far stays). Changing settings afterwards
 marks the results as outdated until the next run. The eraser icon clears the tab.
+Keyboard: `/` focuses the question box (not while typing in a field), `F1` / `F2` / `F3` jump to Search / Browse / Code and
+`Ctrl+Alt+Left` / `Ctrl+Alt+Right` step through them. The model and the answer language are read-only while
+"Answer with LLM" is off.
 The Search / Browse switch in the header belongs to the tab: Browse lists every indexed article
 (`/api/pages`) grouped by product and section, narrowed by the product filter and by the words typed
 in the title filter; each view keeps its own text, and `?view=browse&filter=...` opens it directly.
+The eye button at the start of a row opens a preview: the article is fetched from the server when pressed (`/api/pages/{id}`)
+and shown in a window over the blurred page, with its headings, lists, tables, quotes and links; pictures show as
+placeholders. Esc, the cross or a click outside closes it; "Open in Confluence" goes to the original.
 Cards are numbered by rank; with an LLM answer, the cards used as sources keep a filled badge with
 their source number. The bug icon turns on debug mode: under each card and fragment it shows how the
 fragment was scored (`vector #rank cosine · bm25 #rank score · rrf · retrieval #rank · rerank`); under an
@@ -166,6 +172,7 @@ host names in `RAG_ALLOWED_HOSTS`, and sends no CORS headers, so other web pages
 | `GET /api/llm` | whether answer generation is available, the default and all chat models |
 | `GET /api/products` | the values for the `product` filter |
 | `GET /api/pages` | every indexed page with its Confluence link |
+| `GET /api/pages/{id}` | one article as the sync stored it (Markdown without the title, plus title, breadcrumbs, `updated`, link); 404 when the id is not synced |
 
 `GET /api/search?q=...&k=10&mode=hybrid|vector|fts&product=...&rerank=false`
 
@@ -213,6 +220,10 @@ models with their load state (`{"available", "model", "models": [{"id", "loaded"
                           "breadcrumbs": ["..."], "updated": "...", "labels": ["..."]}]}
 ```
 
+`GET /api/pages/{id}` returns `{"page_id", "title", "url", "breadcrumbs", "product", "updated", "labels", "markdown"}` for the Browse
+preview. It reads the synced copy in `raw-data/` (the server holds no Confluence token), so `updated` is the page's last change at
+the time of the last sync; the id is digits only.
+
 ## Code corpus (experimental, branch `feat/code-search`)
 
 A second index next to the Confluence one: units of Odoo addons (manifest, model cards with field help, methods,
@@ -230,9 +241,11 @@ scripts/eval-traces.sh --misses                      # does the evidence contain
 scripts/bench-traces.sh MODEL [MODEL...] --group real  # same evidence and prompt to several local LLMs, report in data/bench/
 ```
 
-The web UI has one three-position switch per tab (Search, Browse, Code): Code takes a pasted traceback, shows the frames mapped to code and, with
+The web UI has one three-position switch per tab (Search, Browse, Code): Code takes a described problem and/or a traceback (optional: "Add traceback" next to the question opens a small window for it, which collapses to its title bar; a traceback pasted into the question box moves there), shows the frames mapped to code and, with
 "Answer with LLM", an explanation citing the code as `[n]`. Source code is not sent to the Claude API unless
 `RAG_CODE_EXTERNAL_LLM=1`. `eval/traces.yaml` is git-ignored; start from `eval/traces.example.yaml`.
+
+A question that names a function (quoted, snake_case, camelCase or `model.method`) gets its definition by exact name, so "how does `_import_one_product` work?" quotes the method itself and the answer walks through it step by step.
 
 The graph and the chains come from static analysis: a dynamic `_inherit` or a call by a string name is not seen.
 The search index and the graph are written one after the other (`--no-index` writes only the graph). The index records the
