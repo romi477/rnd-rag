@@ -50,6 +50,7 @@ def run_trace_bench(
     llm: LLM,
     log: Callable[[str], None] = lambda _: None,
     on_item: Callable[[list[Item]], None] = lambda _: None,
+    lang: str = "en",
 ) -> list[Item]:
     """Every case on every model. A model that fails to warm up stops the bench."""
     for model in models:
@@ -66,7 +67,7 @@ def run_trace_bench(
         if not sources:
             log(f"{i + 1:>2} {case.id}: no sources, skipped")
         else:
-            messages = build_code_messages(case.question, ev, context)
+            messages = build_code_messages(case.question, ev, context, lang)
             for model in models if i % 2 == 0 else models[::-1]:  # no model always runs right after another one
                 run = item.runs[model] = generate(llm, model, messages)
                 log(f"{i + 1:>2} {case.id} {model}: {describe(run)}")

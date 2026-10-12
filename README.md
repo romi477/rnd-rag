@@ -36,6 +36,11 @@ and answer) and tabs survive a page reload. To compare models, run the same ques
 with different models. Models marked "(not loaded)" are loaded by LM Studio on first use.
 Result cards collapse to their title: the answer and the first card start expanded, the rest
 collapsed, and a citation [n] expands the card it points to.
+The answer language (English, Spanish, German, Polish, Russian) is chosen next to the model: the prompts stay English, the
+model is told to answer in that language and to keep menu paths, settings, error messages and code as in the sources.
+The API takes `lang` (`/api/answer`) or `language` (`/api/code/answer`); `/api/languages` lists them. The documentation is
+English: questions in the other languages are searched by the multilingual embedder and reranker, not translated.
+
 Only the button runs a query: it reads "Find", or "Ask" when "Answer with LLM" is on, and "Stop"
 next to it cancels a running request (what has streamed so far stays). Changing settings afterwards
 marks the results as outdated until the next run. The eraser icon clears the tab.
@@ -88,7 +93,7 @@ scripts/serve.sh      # web UI at http://127.0.0.1:8000
 | `index.sh [--force] [--model M]` | chunk + embed changed pages into `data/lancedb/` |
 | `serve.sh [port] [--offline]` | web UI + JSON API (`RAG_HOST` / `RAG_PORT` env vars also work); `--offline` skips the Hugging Face update check |
 | `search.sh "query" [--text]` | search from the terminal |
-| `ask.sh "question" [--no-rerank]` | search + streamed LLM answer with sources in the terminal |
+| `ask.sh "question" [--no-rerank] [--lang ru]` | search + streamed LLM answer with sources in the terminal; `--lang` en, es, de, pl, ru (default `RAG_ANSWER_LANGUAGE`) |
 | `eval.sh [--misses]` | retrieval quality on `eval/queries.yaml` |
 | `bench.sh [MODEL ...] [--group G]` | compare LLMs on `eval/bench.yaml`: latency, tokens/s, answers side by side |
 | `test.sh` | unit tests |

@@ -26,6 +26,11 @@ const DOCS_SUBTITLE = $("subtitle").textContent;
 const CODE_PLACEHOLDER = "Optional: a question about the failure…";
 const CODE_DEFAULTS = {trace: "", module: "", version: "", docs: false};
 const CODE_FIELDS = Object.keys(CODE_DEFAULTS);
+const SETTING_DEFAULTS = {mode: "docs", ...CODE_DEFAULTS, lang: ""}; // what a saved `ran` snapshot may lack
+// The languages an answer can be written in (GET /api/languages); "" in a tab means the server's default.
+let languages = [{code: "en", name: "English", native: "English"}];
+let defaultLang = "en";
+let languagesLoaded = false;
 let metaError = ""; // the product list could not be loaded
 // Browse: every indexed article (GET /api/pages), loaded once and shared by all tabs.
 let pages = null;
@@ -41,7 +46,7 @@ const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2
 // view: "search" or "browse" (the title filter of the article list is `filter`, kept apart from the query `q`).
 function newTab(init = {}) {
   return {id: newId(), mode: "docs", view: "search", q: "", filter: "", product: "", llm: false, model: "",
-          ...CODE_DEFAULTS, data: null, answer: null, status: "", error: "", busy: false, ...init};
+          ...CODE_DEFAULTS, lang: "", data: null, answer: null, status: "", error: "", busy: false, ...init};
 }
 
 const activeTab = () => tabs.find((t) => t.id === activeId);
@@ -109,14 +114,15 @@ function sanitize(t) {
   delete tab.rerank; // a setting of older versions (their search `mode` is replaced below: it is not "docs" / "code")
   if (!MODES.includes(tab.mode)) tab.mode = "docs"; // tabs saved before the Code mode are Docs tabs
   if (!VIEWS.includes(tab.view) || tab.mode === "code") tab.view = "search";
-  for (const k of ["q", "filter", "product", "model", "error", "trace", "module", "version"]) if (typeof tab[k] !== "string") tab[k] = "";
+  for (const k of ["q", "filter", "product", "model", "error", "trace", "module", "version", "lang"]) if (typeof tab[k] !== "string") tab[k] = "";
   tab.q = tab.q.slice(0, 500);
   tab.filter = tab.filter.slice(0, 500);
   tab.trace = tab.trace.slice(0, TRACE_MAX);
   tab.version = tab.version.slice(0, 50);
   tab.llm = !!tab.llm;
   tab.docs = !!tab.docs;
-  if (tab.ran) tab.ran = {mode: "docs", ...CODE_DEFAULTS, ...tab.ran}; // else the new settings would look "changed"
+  tab.lang = tab.lang.slice(0, 10);
+  if (tab.ran) tab.ran = {...SETTING_DEFAULTS, ...tab.ran}; // else the new settings would look "changed"
   return tab;
 }
 
@@ -135,6 +141,17 @@ function readForm(tab) {
   }
   tab.llm = $("llm").checked;
   if (llmInfo.checked) tab.model = $("model").value;
+  if (languagesLoaded) tab.lang = $("lang").value;
+}
+
+const effectiveLang = (tab) => (languages.some((l) => l.code === tab.lang) ? tab.lang : defaultLang);
+
+// What a request carries: nothing until the list is loaded, so that the server's own default applies.
+const langParam = (tab) => (languagesLoaded ? effectiveLang(tab) : "");
+
+function fillLanguages(tab) {
+  $("lang").innerHTML = languages.map((l) => `<option value="${escapeHtml(l.code)}" title="${escapeHtml(l.name)}">${escapeHtml(l.native)}</option>`).join("");
+  $("lang").value = tab ? effectiveLang(tab) : defaultLang;
 }
 
 // Options of the product select. Until the list is loaded (or when it failed to load) the tab's own product
@@ -177,15 +194,17 @@ function writeForm(tab) {
   updatePlaceholder(tab);
   $("llm").checked = tab.llm;
   $("model").value = hasOption("model", tab.model) ? tab.model : "";
+  $("lang").value = effectiveLang(tab);
   for (const view of VIEWS) $(`view-${view}`).setAttribute("aria-pressed", String(tab.view === view));
   updateSubmitLabel(tab);
 }
 
 // Only the Find / Ask button runs a query; changing settings just marks the results as outdated.
 // The model matters only when the answer is written by the LLM.
-const SETTINGS = ["mode", "q", "product", "trace", "module", "version", "docs", "llm", "model"];
+const SETTINGS = ["mode", "q", "product", "trace", "module", "version", "docs", "llm", "model", "lang"];
+const LLM_ONLY = ["model", "lang"]; // matter only when the answer is written by the LLM
 const settingsOf = (tab) => Object.fromEntries(SETTINGS.map((k) => [k, tab[k]]));
-const isStale = (tab) => !!(tab.data && tab.ran && SETTINGS.some((k) => tab.ran[k] !== tab[k] && (k !== "model" || tab.llm)));
+const isStale = (tab) => !!(tab.data && tab.ran && SETTINGS.some((k) => tab.ran[k] !== tab[k] && (!LLM_ONLY.includes(k) || tab.llm)));
 
 const submitLabel = (tab) => {
   const llm = tab.llm && llmInfo.available;
@@ -789,6 +808,7 @@ function updateUrl(tab) {
   if (tab.product) params.set("product", tab.product);
   if (tab.llm) params.set("llm", "true");
   if (tab.llm && tab.model) params.set("model", tab.model);
+  if (tab.llm && tab.lang) params.set("lang", tab.lang);
   history.replaceState(null, "", "?" + params);
 }
 
@@ -804,7 +824,7 @@ function addTab() {
   const current = activeTab();
   readForm(current);
   // a new tab inherits the settings, not the query
-  const tab = newTab({product: current.product, llm: current.llm, model: current.model});
+  const tab = newTab({product: current.product, llm: current.llm, model: current.model, lang: current.lang});
   tabs.push(tab);
   activeId = tab.id;
   renderView();
@@ -904,6 +924,7 @@ function applyAnswerEvent(tab, ev) {
 
 async function runAnswer(tab, params, signal) {
   if (tab.model) params.set("model", tab.model);
+  if (langParam(tab)) params.set("lang", langParam(tab));
   const res = await fetch("/api/answer?" + params, {signal});
   if (!res.ok) throw await httpError(res);
   await readNdjson(res, (ev) => {
@@ -919,7 +940,7 @@ async function runAnswer(tab, params, signal) {
 // Code mode: the evidence for the traceback arrives first; with the LLM on, the explanation streams after it.
 async function runCode(tab, useLlm, signal) {
   const body = {question: tab.q, traceback: tab.trace, modules: tab.module ? [tab.module] : [],
-    client_version: tab.version, docs: tab.docs, answer: useLlm};
+    client_version: tab.version, docs: tab.docs, answer: useLlm, language: langParam(tab) || null};
   if (useLlm && tab.model) body.model = tab.model;
   const res = await fetch("/api/code/answer", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), signal});
   if (!res.ok) throw await httpError(res);
@@ -1003,7 +1024,7 @@ async function refreshLlmStatus() {
   $("model").innerHTML = `<option value="">Default (${escapeHtml(llmInfo.model || "none")})</option>` +
     llmInfo.models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${m.loaded === false ? " (not loaded)" : ""}</option>`).join("");
   $("model").value = [...$("model").options].some((o) => o.value === selected) ? selected : "";
-  $("llm").disabled = $("model").disabled = !llmInfo.available;
+  $("llm").disabled = $("model").disabled = $("lang").disabled = !llmInfo.available;
   // With the Claude API the question and the doc excerpts leave this machine: say so where the switch is.
   const external = llmInfo.provider === "anthropic";
   $("llm-provider").hidden = !external;
@@ -1011,6 +1032,21 @@ async function refreshLlmStatus() {
     (external ? "\n\nThis server answers with the Claude API: the question and the doc excerpts are sent to Anthropic." : "") +
     (llmInfo.available ? "" : `\n\nUnavailable now: ${llmInfo.error}`);
   if (activeTab()) updateSubmitLabel(activeTab());
+}
+
+// --- answer languages -----------------------------------------------------------
+
+async function loadLanguages() {
+  try {
+    const res = await fetch("/api/languages");
+    if (!res.ok) throw await httpError(res);
+    const body = await res.json();
+    languages = body.languages;
+    defaultLang = body.default;
+    languagesLoaded = true;
+  } catch { return; } // keep English only: the answer then uses the server's default
+  const tab = activeTab();
+  if (tab) fillLanguages(tab);
 }
 
 // --- init ---------------------------------------------------------------------
@@ -1030,13 +1066,13 @@ function openFromUrl() {
     : browse
     ? sanitize({view: "browse", product: params.get("product") || "", filter: params.get("filter") || ""})
     : sanitize({q: params.get("q").trim(), product: params.get("product") || "", llm: flag(params.get("llm"), false),
-        model: params.get("model") || ""}); // mode / rerank in older links are ignored
+        model: params.get("model") || "", lang: params.get("lang") || ""}); // mode / rerank in older links are ignored
   const same = code
     ? (t) => t.mode === "code" && t.q === wanted.q && t.module === wanted.module
     : browse
     ? (t) => t.mode === "docs" && t.view === "browse" && t.product === wanted.product && t.filter === wanted.filter
     : (t) => t.mode === "docs" && t.view === "search" &&
-        SETTINGS.every((k) => t[k] === wanted[k] || (k === "model" && !t.llm) || CODE_FIELDS.includes(k));
+        SETTINGS.every((k) => t[k] === wanted[k] || (LLM_ONLY.includes(k) && !t.llm) || CODE_FIELDS.includes(k));
   const runs = code ? !!wanted.q : !browse; // a link to Code mode runs only when it carries a question
   const existing = [activeTab(), ...tabs].find((t) => t && same(t));
   if (existing) { activeId = existing.id; return runs && !existing.data; }
@@ -1055,6 +1091,7 @@ async function init() {
   renderView();
   markFilterRows();
   refreshLlmStatus(); // LM Studio may be slow to answer: don't wait for it
+  loadLanguages();
   if (activeTab().view === "browse") loadPages();
   if (activeTab().mode === "code") loadCodeModules();
   await loadProducts();
@@ -1118,7 +1155,7 @@ $("theme").addEventListener("click", toggleTheme);
 }
 systemDark.addEventListener("change", () => { if (!savedTheme()) applyTheme(); });
 window.addEventListener("storage", (e) => { if (e.key === THEME_KEY) applyTheme(); });
-["product", "llm", "model", "code-module", "code-docs"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
+["product", "llm", "model", "lang", "code-module", "code-docs"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
 $("client-version").addEventListener("input", onSettingsChange);
 $("tabs").addEventListener("click", (e) => {
   const close = e.target.closest("[data-close]");

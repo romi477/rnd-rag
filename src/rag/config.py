@@ -63,3 +63,14 @@ CODE_INNER_FRAMES = int(os.environ.get("RAG_CODE_INNER_FRAMES", 3))
 # Source code is not documentation: with the Claude provider, code answers are refused unless this is set to 1.
 CODE_EXTERNAL_LLM = os.environ.get("RAG_CODE_EXTERNAL_LLM", "0") == "1"
 TRACES_FILE = Path(os.environ.get("RAG_TRACES_FILE", ROOT / "eval" / "traces.yaml"))  # cases for `rag eval-traces`
+
+# Answer languages: code -> (English name for the prompt, native name for the UI). The prompts stay English; the
+# model is told to answer in the language. RAG_ANSWER_LANGUAGE is the default when a request names none.
+ANSWER_LANGUAGES = {
+    "en": ("English", "English"),
+    "es": ("Spanish", "Español"),
+    "de": ("German", "Deutsch"),
+    "pl": ("Polish", "Polski"),
+    "ru": ("Russian", "Русский"),
+}
+ANSWER_LANGUAGE = os.environ.get("RAG_ANSWER_LANGUAGE", "en")

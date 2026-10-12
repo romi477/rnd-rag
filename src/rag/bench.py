@@ -116,6 +116,7 @@ def run_bench(
     rerank: bool = True,
     log: Callable[[str], None] = lambda _: None,
     on_item: Callable[[list[Item]], None] = lambda _: None,
+    lang: str = "en",
 ) -> list[Item]:
     """Run every question on every model. `on_item` gets the items so far after each question,
     so that a report survives an interruption. A model that fails to warm up stops the bench."""
@@ -141,7 +142,7 @@ def run_bench(
         if not sources:
             log(f"{i + 1:>2} no sources, skipped: {question.q}")
         else:
-            messages = build_messages(question.q, context)
+            messages = build_messages(question.q, context, lang)
             # alternate the order so that no model always runs right after another one
             for model in models if i % 2 == 0 else models[::-1]:
                 run = item.runs[model] = generate(llm, model, messages)

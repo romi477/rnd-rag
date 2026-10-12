@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 
 from rag import config
-from rag.answer import clean_text, stream_llm
+from rag.answer import answer_in, check_language, clean_text, language_rule, stream_llm
 from rag.chunking import approx_tokens
 from rag.code_graph import CodeGraph, MethodRef
 from rag.code_lookup import COLUMNS, FrameUnit, find_error_code, related_methods, resolve_frames, whole_unit
@@ -23,7 +23,7 @@ from rag.llm import LLM
 from rag.store import sql_str
 from rag.traceback import ParsedTraceback, parse_traceback, semantic_query, version_note
 
-CODE_SYSTEM_PROMPT = """\
+CODE_SYSTEM_PROMPT_TEMPLATE = """\
 You are a support engineer for a family of Odoo e-commerce connector modules. You get a failure (the exception \
 and the frames of a Python traceback from a failed background job), numbered sources (code excerpts with their file \
 path and line range, error-code registry entries, documentation) and a question.
@@ -43,9 +43,28 @@ number that is not in the sources. Write locations as `path:line`.
 6. Line numbers belong to the indexed version. If a note says the client runs another version, say the code may differ.
 7. Do not invent code, settings, error codes, versions or links. Do not suggest anything that changes data unless the \
 sources describe it.
-8. Always answer in English. Start with the cause in one or two sentences, then details as a short list. Be concise."""
+8. {language_rule} Start with the cause in one or two sentences, then details as a short list. Be concise."""
 
-NO_CODE_SOURCES = "Nothing relevant was found in the indexed code for this failure."
+
+def code_system_prompt(lang: str = "en") -> str:
+    rule = language_rule(
+        lang, "Always answer in English.",
+        "Always answer in {language}, although the sources are in English. Keep code, file paths, function and setting "
+        "names and error messages exactly as they are: do not translate them.",
+    )
+    return CODE_SYSTEM_PROMPT_TEMPLATE.format(language_rule=rule)
+
+
+CODE_SYSTEM_PROMPT = code_system_prompt("en")
+
+NO_CODE_SOURCES_BY_LANG = {
+    "en": "Nothing relevant was found in the indexed code for this failure.",
+    "es": "No se encontró nada relevante en el código indexado para este fallo.",
+    "de": "Im indexierten Code wurde für diesen Fehler nichts Relevantes gefunden.",
+    "pl": "W zaindeksowanym kodzie nie znaleziono nic istotnego dla tego błędu.",
+    "ru": "В проиндексированном коде не найдено ничего подходящего для этой ошибки.",
+}
+NO_CODE_SOURCES = NO_CODE_SOURCES_BY_LANG["en"]
 DEFAULT_QUESTION = "Why did this fail and what should be done?"
 ROLE_TEXT = {
     "frame": "frame of the traceback (innermost first)",
@@ -282,16 +301,22 @@ def failure_summary(ev: Evidence) -> str:
     return "\n".join(lines)
 
 
-def build_code_messages(question: str, ev: Evidence, context: str) -> list[dict]:
+def build_code_messages(question: str, ev: Evidence, context: str, lang: str = "en") -> list[dict]:
     parts = [p for p in (failure_summary(ev), f"Sources:\n\n{context}") if p]
     return [
-        {"role": "system", "content": CODE_SYSTEM_PROMPT},
-        {"role": "user", "content": "\n\n".join(parts) + f"\n\n---\n\nQuestion: {question.strip() or DEFAULT_QUESTION}"},
+        {"role": "system", "content": code_system_prompt(lang)},
+        {
+            "role": "user",
+            "content": "\n\n".join(parts) + f"\n\n---\n\nQuestion: {question.strip() or DEFAULT_QUESTION}{answer_in(lang)}",
+        },
     ]
 
 
-def stream_code_answer(question: str, ev: Evidence, llm: LLM, model: str | None = None, pages=None) -> Iterator[dict]:
-    """Events: sources -> delta* -> done, or an error event. `pages` (Confluence hits) continue the numbering."""
+def stream_code_answer(
+    question: str, ev: Evidence, llm: LLM, model: str | None = None, pages=None, lang: str = "en"
+) -> Iterator[dict]:
+    """Events: sources -> delta* -> done, or an error event. `pages` (Confluence hits) continue the numbering;
+    `lang` is the language of the answer."""
     from rag.answer import build_context
 
     sources, context = build_code_context(ev.pieces)
@@ -303,7 +328,7 @@ def stream_code_answer(question: str, ev: Evidence, llm: LLM, model: str | None 
             context = "\n\n".join(filter(None, [context, "Documentation:\n\n" + doc_context]))
     yield {"type": "sources", "sources": listed}
     if not listed:
-        yield {"type": "delta", "text": NO_CODE_SOURCES}
+        yield {"type": "delta", "text": NO_CODE_SOURCES_BY_LANG[check_language(lang)]}
         yield {"type": "done", "model": None, "took_ms": 0}
         return
-    yield from stream_llm(build_code_messages(question, ev, context), llm, model)
+    yield from stream_llm(build_code_messages(question, ev, context, lang), llm, model)

@@ -41,6 +41,7 @@ class FakeLLM:
         return {"available": True, "model": "m1", "models": self.list_models(), "error": None}
 
     def stream_chat(self, messages, model=None, info=None):
+        self.messages = messages
         yield "Use the installer [1]."
         info["finish_reason"] = "stop"
 

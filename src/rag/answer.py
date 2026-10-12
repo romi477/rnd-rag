@@ -15,7 +15,7 @@ from rag.llm import LLM, LLMError
 if TYPE_CHECKING:  # rag.search pulls in torch: not needed to build a prompt
     from rag.search import PageHit
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT_TEMPLATE = """\
 You are a support assistant that answers questions about product documentation.
 You get numbered sources (documentation excerpts) and a question.
 
@@ -31,9 +31,54 @@ when that helps.
 5. Keep menu paths, setting names, field names, error messages and code exactly as in the sources; \
 format them as `code` or **bold**. Write menu paths with "→"; never use LaTeX.
 6. Do not invent settings, menu paths, versions, prices or links.
-7. Always answer in English, like the documentation. Be concise."""
+7. {language_rule}"""
 
-NO_SOURCES = "Nothing relevant was found in the documentation for this question."
+ENGLISH_RULE = "Always answer in English, like the documentation. Be concise."
+
+
+def check_language(lang: str | None = None) -> str:
+    """The language code of a request: `ru`, `RU`, `ru-RU` and `ru_RU` are Russian; nothing means the default.
+    Raises ValueError for a language that is not supported."""
+    code = (lang or "").strip().lower().replace("_", "-").split("-")[0] or config.ANSWER_LANGUAGE
+    if code not in config.ANSWER_LANGUAGES:
+        raise ValueError(f"Unsupported language {lang!r}, expected one of {', '.join(config.ANSWER_LANGUAGES)}")
+    return code
+
+
+def language_name(lang: str) -> str:
+    return config.ANSWER_LANGUAGES[check_language(lang)][0]
+
+
+def language_rule(lang: str, english: str, other: str) -> str:
+    """The prompt's last rule: `english` as it always was, or `other` (with {language}) for another language."""
+    code = check_language(lang)
+    return english if code == "en" else other.format(language=language_name(code))
+
+
+def answer_in(lang: str) -> str:
+    """The reminder after the question for a language other than English (the sources are English)."""
+    return "" if check_language(lang) == "en" else f"\n\nAnswer in {language_name(lang)}."
+
+
+def system_prompt(lang: str = "en") -> str:
+    rule = language_rule(
+        lang, ENGLISH_RULE,
+        "Always answer in {language}, although the sources are in English. Keep menu paths, setting names, field names, "
+        "error messages and code exactly as in the sources: do not translate them. Be concise.",
+    )
+    return SYSTEM_PROMPT_TEMPLATE.format(language_rule=rule)
+
+
+SYSTEM_PROMPT = system_prompt("en")
+
+NO_SOURCES_BY_LANG = {
+    "en": "Nothing relevant was found in the documentation for this question.",
+    "es": "No se encontró nada relevante en la documentación para esta pregunta.",
+    "de": "Zu dieser Frage wurde in der Dokumentation nichts Relevantes gefunden.",
+    "pl": "W dokumentacji nie znaleziono nic istotnego w tej sprawie.",
+    "ru": "В документации не найдено ничего подходящего для этого вопроса.",
+}
+NO_SOURCES = NO_SOURCES_BY_LANG["en"]
 EMPTY_ANSWER = "The model returned no answer text (a reasoning model may have spent max_tokens on thinking)."
 
 
@@ -95,10 +140,10 @@ def token_usage(usage: dict | None) -> dict | None:
     return counts
 
 
-def build_messages(query: str, context: str) -> list[dict]:
+def build_messages(query: str, context: str, lang: str = "en") -> list[dict]:
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Sources:\n\n{context}\n\n---\n\nQuestion: {query}"},
+        {"role": "system", "content": system_prompt(lang)},
+        {"role": "user", "content": f"Sources:\n\n{context}\n\n---\n\nQuestion: {query}{answer_in(lang)}"},
     ]
 
 
@@ -136,13 +181,13 @@ def stream_llm(messages: list[dict], llm: LLM, model: str | None = None) -> Iter
 
 
 def stream_answer(
-    query: str, pages: list[PageHit], llm: LLM, model: str | None = None
+    query: str, pages: list[PageHit], llm: LLM, model: str | None = None, lang: str = "en"
 ) -> Iterator[dict]:
-    """Events: sources -> delta* -> done, or an error event instead of done."""
+    """Events: sources -> delta* -> done, or an error event instead of done. `lang`: the language of the answer."""
     sources, context = build_context(pages)
     yield {"type": "sources", "sources": [asdict(s) for s in sources]}
     if not sources:
-        yield {"type": "delta", "text": NO_SOURCES}
+        yield {"type": "delta", "text": NO_SOURCES_BY_LANG[check_language(lang)]}
         yield {"type": "done", "model": None, "took_ms": 0}
         return
-    yield from stream_llm(build_messages(query, context), llm, model)
+    yield from stream_llm(build_messages(query, context, lang), llm, model)

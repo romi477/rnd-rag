@@ -31,6 +31,15 @@ def check_corpus(corpus: str) -> str:
     return corpus
 
 
+def check_lang(lang: str) -> str:
+    from rag.answer import check_language
+
+    try:
+        return check_language(lang)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 def fail(message: str) -> None:
     typer.secho(message, fg="red", err=True)
     raise typer.Exit(1)
@@ -360,7 +369,7 @@ def search(
         typer.echo("No results")
 
 
-def code_events(query, traceback_file, modules, client_version, with_docs, model, llm, show_prompt):
+def code_events(query, traceback_file, modules, client_version, with_docs, model, llm, show_prompt, lang="en"):
     """Events of a code answer; with `show_prompt` a single delta holding the messages for the LLM."""
     import sys
 
@@ -388,10 +397,10 @@ def code_events(query, traceback_file, modules, client_version, with_docs, model
     if show_prompt:
         sources, context = build_code_context(ev.pieces)
         yield {"type": "sources", "sources": [dict(vars(s)) for s in sources]}
-        for m in build_code_messages(query, ev, context):
+        for m in build_code_messages(query, ev, context, lang):
             yield {"type": "delta", "text": f"--- {m['role']} ---\n{m['content']}\n"}
         return
-    yield from stream_code_answer(query, ev, llm, pages=pages)
+    yield from stream_code_answer(query, ev, llm, pages=pages, lang=lang)
 
 
 @app.command()
@@ -408,6 +417,7 @@ def ask(
     with_docs: bool = typer.Option(False, "--docs", help="Code corpus: also quote Confluence pages"),
     model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
     show_prompt: bool = typer.Option(False, help="Code corpus: print the sources and the prompt, do not call the LLM"),
+    lang: str = typer.Option("", "--lang", help="Answer language: en, es, de, pl, ru (default: RAG_ANSWER_LANGUAGE)", callback=check_lang),
 ) -> None:
     """Answer a question with the LLM (RAG_LLM_PROVIDER), grounded in the search results."""
     from rag.answer import stream_answer
@@ -419,13 +429,13 @@ def ask(
         if not show_prompt and (reason := external_llm_blocked()):
             fail(reason)
         events = code_events(
-            query, traceback_file, module, client_version, with_docs, model, make_llm(model=llm_model), show_prompt
+            query, traceback_file, module, client_version, with_docs, model, make_llm(model=llm_model), show_prompt, lang
         )
     else:
         if not query.strip():
             fail("Give a question")
         hits = open_searcher().search(query, k=config.LLM_CONTEXT_PAGES, mode=mode, product=product, rerank=rerank)
-        events = stream_answer(query, hits, make_llm(model=llm_model))
+        events = stream_answer(query, hits, make_llm(model=llm_model), lang=lang)
     for event in events:
         if event["type"] == "delta":
             typer.echo(event["text"], nl=False)
@@ -496,6 +506,7 @@ def bench_traces(
     limit: int = typer.Option(0, help="Only the first N cases (0: all)"),
     model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
     out: Path = typer.Option(None, help="Report path (default: data/bench/traces-<time>.md)"),
+    lang: str = typer.Option("", "--lang", help="Answer language: en, es, de, pl, ru (default: RAG_ANSWER_LANGUAGE)", callback=check_lang),
 ) -> None:
     """Compare LLMs on the failure cases: the same evidence and prompt, answers side by side in a report."""
     from rag.code_answer import external_llm_blocked
@@ -530,7 +541,7 @@ def bench_traces(
     searcher = CodeSearcher(make_embedder(model), store)
     try:
         items = run_trace_bench(
-            cases, models, store, graph, searcher, llm, log=typer.echo,
+            cases, models, store, graph, searcher, llm, log=typer.echo, lang=lang,
             on_item=lambda items: path.write_text(render_report(items, models, settings, partial=True)),
         )
     except (LLMError, KeyboardInterrupt) as exc:
@@ -547,6 +558,7 @@ def bench(
     out: Path | None = typer.Option(None, help="Markdown report (default: data/bench/<time>.md)"),
     mode: str = typer.Option("hybrid", help="hybrid | vector | fts", callback=check_mode),
     rerank: bool = typer.Option(True, help="Rerank and drop low-relevance sources"),
+    lang: str = typer.Option("", "--lang", help="Answer language: en, es, de, pl, ru (default: RAG_ANSWER_LANGUAGE)", callback=check_lang),
 ) -> None:
     """Compare LLMs on the same questions and sources: latency, tokens/s, answers side by side.
 
@@ -589,7 +601,7 @@ def bench(
         out.write_text(render_report(items, models, settings, partial=partial))
 
     try:
-        items = run_bench(searcher, llm, questions, models, mode=mode, rerank=rerank, log=typer.echo, on_item=write)
+        items = run_bench(searcher, llm, questions, models, mode=mode, rerank=rerank, log=typer.echo, on_item=write, lang=lang)
     except (KeyboardInterrupt, LLMError) as exc:
         if done:
             write(done)

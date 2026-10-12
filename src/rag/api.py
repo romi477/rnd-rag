@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from rag import config
-from rag.answer import stream_answer
+from rag.answer import check_language, stream_answer
 from rag.code_answer import evidence_dict, external_llm_blocked, gather, stream_code_answer
 from rag.code_graph import CodeGraph, graph_path
 from rag.code_search import CodeSearcher
@@ -126,6 +126,22 @@ def check_model(model: str | None) -> None:
         raise HTTPException(400, f"Unknown LLM model {model!r}")
 
 
+def requested_language(lang: str | None) -> str:
+    try:
+        return check_language(lang)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/languages")
+def languages() -> dict:
+    """The languages an answer can be written in, and the server's default."""
+    return {
+        "default": check_language(None),
+        "languages": [{"code": c, "name": n, "native": nat} for c, (n, nat) in config.ANSWER_LANGUAGES.items()],
+    }
+
+
 @app.get("/api/answer")
 def answer(
     q: str = Query(..., min_length=1, max_length=500),
@@ -134,14 +150,16 @@ def answer(
     product: str | None = None,
     rerank: bool = True,  # the relevance cut-off keeps unrelated pages out of the prompt
     model: str | None = Query(None, max_length=200, description="LLM id; default: RAG_LLM_MODEL, the model loaded in LM Studio, or claude-sonnet-5-5"),
+    lang: str | None = Query(None, max_length=10, description="Answer language: en, es, de, pl or ru (default: RAG_ANSWER_LANGUAGE)"),
 ) -> StreamingResponse:
     """Search + LLM answer as NDJSON events: results, sources, delta*, done | error.
 
     The search runs once: its results are the first event, the top pages become the sources.
     """
+    language = requested_language(lang)  # before the slot: a rejected request must not use up the hourly limit
+    check_model(model)
     if not take_answer_slot():
         raise HTTPException(429, f"Too many LLM answers: the limit is {config.ANSWERS_PER_HOUR} per hour (RAG_ANSWERS_PER_HOUR)")
-    check_model(model)
     hits, took_ms = run_search(q, k, mode, product, rerank)
 
     def events() -> Iterator[str]:
@@ -149,7 +167,7 @@ def answer(
         yield json.dumps(first, ensure_ascii=False) + "\n"
         # The LLM runs outside the model lock.
         try:
-            for event in stream_answer(q, hits, state["llm"], model=model or None):
+            for event in stream_answer(q, hits, state["llm"], model=model or None, lang=language):
                 yield json.dumps(event, ensure_ascii=False) + "\n"
         except Exception as exc:  # the headers are sent: report it in the stream instead of cutting it off
             log.exception("Answer failed")
@@ -205,6 +223,7 @@ class CodeAnswerRequest(BaseModel):
     docs: bool = False  # also quote Confluence pages
     answer: bool = True  # False: only the evidence (the `results` event), no LLM, no use of the hourly limit
     model: str | None = Field(None, max_length=200)
+    language: str | None = Field(None, max_length=10)  # answer language: en, es, de, pl or ru
 
 
 @app.post("/api/code/answer")
@@ -214,6 +233,7 @@ def code_answer(req: CodeAnswerRequest) -> StreamingResponse:
     if not req.question.strip() and not req.traceback.strip():
         raise HTTPException(400, "Give a question or a traceback")
     searcher = code_searcher()
+    language = requested_language(req.language)
     if req.answer:
         if reason := external_llm_blocked():
             raise HTTPException(403, reason)
@@ -238,7 +258,7 @@ def code_answer(req: CodeAnswerRequest) -> StreamingResponse:
         if not req.answer:
             return
         try:  # the LLM runs outside the model lock
-            for event in stream_code_answer(req.question, ev, state["llm"], model=req.model or None, pages=pages):
+            for event in stream_code_answer(req.question, ev, state["llm"], model=req.model or None, pages=pages, lang=language):
                 yield json.dumps(event, ensure_ascii=False) + "\n"
         except Exception as exc:
             log.exception("Code answer failed")
