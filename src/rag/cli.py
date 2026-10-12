@@ -12,6 +12,8 @@ from rag import config
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 module_app = typer.Typer(no_args_is_help=True, help="Odoo addons as a code corpus")
 app.add_typer(module_app, name="module")
+docs_app = typer.Typer(no_args_is_help=True, help="Repository documentation (docs/ directories) as part of the code corpus")
+app.add_typer(docs_app, name="docs")
 
 MODES = ("hybrid", "vector", "fts")  # = rag.search.MODES, without importing torch for --help
 
@@ -214,6 +216,86 @@ def module_rm(
     typer.echo(f"removed {name}")
 
 
+@docs_app.command("add")
+def docs_add(
+    path: Path = typer.Argument(..., help="A repository, or the docs directory inside one"),
+    ref: str = typer.Option(..., help="Git ref to read (branch, tag, sha); the checked-out files are never read"),
+    dir: str = typer.Option("", help="Docs directory inside the repository (default: docs, or PATH itself when it is inside a repository)"),
+    name: str = typer.Option("", help="Name of the source (default: the repository directory name)"),
+    sync: bool = typer.Option(True, "--sync/--no-sync", help="Index it now (needs the embedding model)"),
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+) -> None:
+    """Register the Markdown docs of a repository; they are indexed for the Code mode like the addons' code."""
+    from rag.code_docs import DocsRegistry, DocsSourceError, add_source
+
+    try:
+        source = add_source(DocsRegistry(), path, ref, dir or None, name or None)
+    except DocsSourceError as exc:
+        fail(str(exc))
+    typer.echo(f"{source.name}: {source.dir}/ of {source.repo} at {source.ref}")
+    if sync:
+        docs_sync(only=[source.name], force=True, model=model)
+
+
+@docs_app.command("sync")
+def docs_sync(
+    only: list[str] = typer.Argument(None, help="Source names (default: all)"),
+    force: bool = typer.Option(False, "--force", help="Read the sources even when their docs did not change"),
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+) -> None:
+    """Read the registered docs again at their refs and update the index; unchanged sources are skipped."""
+    from rag.code_docs import DocsRegistry, DocsSourceError, sync_sources
+    from rag.code_store import CodeStore
+    from rag.store import store_path
+
+    registry = DocsRegistry()
+    if not registry.load():
+        fail("no docs sources; add one with `rag docs add REPO --ref REF`")
+    try:
+        results = sync_sources(registry, CodeStore(store_path(model)), make_embedder(model), log=typer.echo, force=force, only=only or None)
+    except DocsSourceError as exc:
+        fail(str(exc))
+    for r in results:
+        if r.error:
+            typer.secho(f"{r.name}: {r.error}", fg="red", err=True)
+        else:
+            typer.echo(f"{r.name}: " + ("unchanged" if r.skipped else f"{r.rows} rows indexed"))
+    if any(r.error for r in results):
+        raise typer.Exit(1)
+
+
+@docs_app.command("list")
+def docs_list(model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)")) -> None:
+    """Registered docs sources and how many rows each has in the search index."""
+    from rag.code_docs import DocsRegistry
+    from rag.code_store import CodeStore
+    from rag.sources.guide_docs import docs_module
+    from rag.store import store_path
+
+    sources, rows = DocsRegistry().load(), CodeStore(store_path(model)).modules()
+    if not sources:
+        typer.echo("no docs sources; add one with `rag docs add REPO --ref REF`")
+    for s in sources.values():
+        typer.echo(f"{s.name:<24}{s.ref:<16}{s.dir + '/':<20}{rows.get(docs_module(s.name), 0):>5} rows  {s.repo}")
+
+
+@docs_app.command("rm")
+def docs_rm(
+    name: str,
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+) -> None:
+    """Forget a docs source and drop its rows from the search index."""
+    from rag.code_docs import DocsRegistry, DocsSourceError, remove_source
+    from rag.code_store import CodeStore
+    from rag.store import store_path
+
+    try:
+        remove_source(DocsRegistry(), CodeStore(store_path(model)), name)
+    except DocsSourceError as exc:
+        fail(str(exc))
+    typer.echo(f"removed {name}")
+
+
 def echo_methods(methods) -> None:
     for m in methods:
         flags = [f for f, on in (("super", m.calls_super), ("abstract", m.abstract)) if on]
@@ -265,7 +347,7 @@ def trace(
     import sys
 
     from rag.code_graph import CodeGraph, graph_path
-    from rag.code_lookup import find_error_code, related_methods, resolve_frames, scope_modules, sync_problems
+    from rag.code_lookup import find_error_code, find_guides, related_methods, resolve_frames, scope_modules, sync_problems
     from rag.code_store import CodeStore
     from rag.store import store_path
     from rag.traceback import parse_traceback, semantic_query, version_note
@@ -302,6 +384,8 @@ def trace(
         typer.echo(f"error code {code}:")
         for u in find_error_code(store, code, scope):
             typer.echo(f"  {u.kind} {u.module}/{u.path}:{u.line_start}-{u.line_end}  {u.name}")
+        for g in find_guides(store, code):
+            typer.echo(f"  guide {g['module']}/{g['path']}:{g['line_start']}-{g['line_end']}  {g['name']}")
     versions = {m.name: m.version for m in graph.modules.values()}
     problems = sync_problems(graph, store, visible)
     for module in sorted(visible):

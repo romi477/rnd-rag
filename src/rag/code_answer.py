@@ -30,6 +30,7 @@ from rag.code_lookup import (
     COLUMNS,
     FrameUnit,
     find_error_code,
+    find_guides,
     named_definitions,
     related_methods,
     resolve_frames,
@@ -40,6 +41,7 @@ from rag.code_lookup import (
 from rag.code_search import CodeSearcher
 from rag.code_store import CodeStore
 from rag.llm import LLM
+from rag.sources.guide_docs import GUIDE_KIND
 from rag.sources.odoo_module import split_lines, unit_key
 from rag.store import sql_str
 from rag.traceback import ParsedTraceback, parse_traceback, semantic_query, version_note
@@ -94,10 +96,14 @@ ROLE_TEXT = {
     "abstract": "abstract declaration of the adapter method",
     "definition": "definition of a function the question names",
     "error code": "error-code registry entry or a place that raises it",
+    "guide": "documentation of the repository (how the feature is meant to work)",
     "search": "search result",
 }
 FRAME_MAX_TOKENS = 800  # a longer innermost frame is cut to a window around the failing line
 FRAME_WINDOW = 40  # lines on each side of the failing line
+CODE_KINDS = ["manifest", "model", "class", "method", "view", "data", "doc"]  # what the code search returns: guides have their own slots
+GUIDES_FOR_CODE = 2  # documentation sections found by the error code, per code
+GUIDES_FROM_SEARCH = 2  # documentation sections added by the search (whatever module is chosen)
 SEARCH_K_WITH_FRAMES = 2  # search hits next to found frames (or named functions): a generic message pulls in unrelated code
 DEFINITIONS_FULL = 2  # named functions quoted in full (the others as signature and docstring)
 DEFINITION_MAX_TOKENS = 1500  # a longer definition is cut to its beginning
@@ -271,6 +277,10 @@ def gather(
                         "error code", u.unit_id, u.module, u.module_version, u.path, u.line_start, u.line_end,
                         f"{code} in {u.name}", u.text[:CODE_PIECE_CHARS], u.name,
                     ))
+        for code in ev.tb.error_codes:
+            for row in find_guides(store, code, GUIDES_FOR_CODE):
+                if not overlaps(pieces, row["module"], row["path"], row["line_start"], row["line_end"]):
+                    pieces.append(guide_piece(row, row["text"]))
         problems = sync_problems(graph, store, visible)
         for module in sorted(visible):
             if note := version_note(client_version, graph.modules[module].version):
@@ -292,14 +302,28 @@ def gather(
     query = " ".join(filter(None, [question.strip(), semantic_query(ev.tb) if ev.tb else ""]))
     if searcher and query:
         k = min(search_k, SEARCH_K_WITH_FRAMES) if defined or any(fu.found for fu in ev.frames) else search_k
-        for hit in searcher.search(query, k=k, modules=modules or None):
+        for hit in searcher.search(query, k=k, modules=modules or None, kinds=CODE_KINDS):
             if not overlaps(pieces, hit.module, hit.path, hit.line_start, hit.line_end):
                 owner = f"{hit.model}.{hit.name}" if hit.model and hit.kind == "method" else hit.name
                 pieces.append(Piece(
                     "search", hit.unit_id, hit.module, hit.module_version, hit.path, hit.line_start, hit.line_end,
                     f"{hit.kind} {owner}", hit.text[:SEARCH_PIECE_CHARS], hit.name,
                 ))
+        # The documentation says how a feature is meant to work: a module chosen in the UI does not filter it out.
+        for hit in searcher.search(query, k=GUIDES_FROM_SEARCH, kinds=[GUIDE_KIND]):
+            if not overlaps(pieces, hit.module, hit.path, hit.line_start, hit.line_end):
+                pieces.append(Piece(
+                    "guide", hit.unit_id, hit.module, hit.module_version, hit.path, hit.line_start, hit.line_end,
+                    hit.name, hit.text[:SEARCH_PIECE_CHARS], hit.name,
+                ))
     return ev
+
+
+def guide_piece(row: dict, text: str) -> Piece:
+    return Piece(
+        "guide", row["unit_id"], row["module"], row["module_version"], row["path"], row["line_start"], row["line_end"],
+        row["name"], text[:CODE_PIECE_CHARS], row["name"],
+    )
 
 
 def frame_piece(fu: FrameUnit, role: str) -> Piece:

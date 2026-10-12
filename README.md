@@ -105,6 +105,7 @@ scripts/serve.sh      # web UI at http://127.0.0.1:8000
 | `eval.sh [--misses]` | retrieval quality on `eval/queries.yaml` |
 | `bench.sh [MODEL ...] [--group G]` | compare LLMs on `eval/bench.yaml`: latency, tokens/s, answers side by side |
 | `module.sh add\|list\|rm\|chain\|adapters\|inspect ...` | code corpus (experimental): Odoo addons read from a git ref into the code graph and the code search index; see "Code corpus" |
+| `docs.sh add REPO --ref REF \| sync \| list \| rm NAME` | code corpus (experimental): the Markdown `docs/` of a repository, read from a git ref and indexed next to the code; `sync` re-reads every registered source and skips the unchanged ones |
 | `trace.sh FILE [--client-version V] [--text]` | map a failed job's traceback to the indexed code: functions, overrides, error codes |
 | `eval-traces.sh [--misses] [--no-search]` | does the evidence for each traceback of `eval/traces.yaml` contain the cause? (no LLM) |
 | `bench-traces.sh MODEL [MODEL ...] [--group G]` | compare LLMs on the failure cases, report in `data/bench/` |
@@ -256,6 +257,15 @@ version and git ref of each module; `module.sh list`, `/api/code/modules` and th
 differ for a module. After a change of the index format (`CODE_INDEX_VERSION`), `module.sh add ... --reset-index` for the
 first module and `add` for the rest rebuild it. The code searcher of a running server opens the index on first use, so
 the first `module add` needs no restart. `module.sh rm NAME` refuses while another module depends on it (`--force`).
+
+Repository documentation joins the same index: `scripts/docs.sh add /path/to/repo --ref 19.0` registers the repository's `docs/`
+(`--dir` names another directory; a path inside a repository is taken as the docs directory itself, and a `docs` that is a
+symbolic link is followed to its target). Every Markdown section becomes a `guide` unit under the name `docs:<repo>`, cited
+as `[n]` next to the code with the role "documentation". A code answer takes the documentation sections that mention the
+traceback's error code (`E…`) and the two best search hits, whichever module is chosen. The docs are read from the git ref, never from
+the checked-out files; `scripts/docs.sh sync` after the docs grew re-reads all sources (a source whose docs directory has the same git
+tree is skipped, `--force` reads it anyway). The documents are internal like the code: they stay local and follow
+`RAG_CODE_EXTERNAL_LLM`.
 
 ## Evaluation
 

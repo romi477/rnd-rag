@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 
 from rag.code_graph import CodeGraph, MethodRef
 from rag.code_store import CodeStore
+from rag.sources.guide_docs import DOCS_PREFIX, GUIDE_KIND
 from rag.sources.odoo_module import CodeUnit
 from rag.store import sql_str
 from rag.traceback import ERROR_CODE, Frame, ParsedTraceback
@@ -126,8 +127,22 @@ def sync_problems(graph: CodeGraph, store: CodeStore, only: Collection[str] | No
                 f"the graph {info.version} ({info.ref or 'working tree'}): add the module again"
             )
     if only is None:
-        problems |= {name: "in the search index but not in the graph" for name in rows if name not in graph.modules}
+        problems |= {
+            name: "in the search index but not in the graph"
+            for name in rows if name not in graph.modules and not name.startswith(DOCS_PREFIX)  # docs sources have no graph entry
+        }
     return problems
+
+
+def find_guides(store: CodeStore, code: str, limit: int = 2) -> list[dict]:
+    """Sections of the repositories' documentation that mention the error code as a whole word, in file order."""
+    rows = store.rows_where(f"kind = {sql_str(GUIDE_KIND)} AND text LIKE {sql_str('%' + code + '%')}", COLUMNS, limit=1000)
+    by_unit: dict[str, list[dict]] = {}
+    for r in rows:
+        if code in ERROR_CODE.findall(r["text"]):
+            by_unit.setdefault(r["unit_id"], []).append(r)
+    units = sorted((whole_unit(parts) for parts in by_unit.values()), key=lambda u: (u["module"], u["path"], u["line_start"]))
+    return units[:limit]
 
 
 def whole_unit(rows: list[dict]) -> dict:
@@ -237,7 +252,7 @@ def find_error_code(
 
     With `modules` (those of the traceback and what they depend on) only their units are returned, because connectors
     may use the same code for different errors; when none of them mentions the code, any module's units are."""
-    rows = store.rows_where(f"text LIKE {sql_str('%' + code + '%')}", COLUMNS, limit=10000)
+    rows = store.rows_where(f"kind != {sql_str(GUIDE_KIND)} AND text LIKE {sql_str('%' + code + '%')}", COLUMNS, limit=10000)
     rows = [r for r in rows if code in ERROR_CODE.findall(r["text"])]
     if modules and any(r["module"] in modules for r in rows):
         rows = [r for r in rows if r["module"] in modules]

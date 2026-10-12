@@ -1,3 +1,4 @@
+import pytest
 from test_answer import FakeLLM
 from test_code_index import FakeEmbedder
 from test_code_lookup import world  # noqa: F401  (fixture)
@@ -304,3 +305,64 @@ def test_a_module_filter_still_finds_a_named_function_of_the_modules_it_depends_
     assert [(p.role, p.module) for p in both.pieces] == [("definition", "demo_core"), ("definition", "demo_shop")]
     # a module that is not in the graph filters nothing in, and does not break the lookup
     assert gather(store, graph, "how does long_one work?", "", searcher=None, modules=["nope"]).pieces == []
+
+
+# --- repository documentation (kind "guide") --------------------------------------------------------------------
+
+
+@pytest.fixture
+def with_guides(world, tmp_path):  # noqa: F811
+    from rag.code_index import index_module
+    from rag.sources.guide_docs import parse_guides
+    from rag.sources.odoo_module import DirSource
+
+    graph, store = world
+    docs = tmp_path / "project_docs"
+    docs.mkdir()
+    (docs / "SUPPORT.md").write_text(
+        "# Support\n\n## Error codes\n\nE514 means the client has an unpaid invoice: collect the payment and retry the order sync.\n\n"
+        "## Carriers\n\nThe carrier is set on the order before sync.\n", encoding="utf-8",
+    )
+    units = parse_guides(DirSource(docs), "project")
+    index_module(store, FakeEmbedder(), "docs:project", units, max_tokens=150, log=lambda m: None, ref="19.0")
+    return graph, store
+
+
+def guide_pieces(ev):
+    return [p for p in ev.pieces if p.role == "guide"]
+
+
+def test_a_guide_that_mentions_the_error_code_comes_right_after_the_code_registry(with_guides):
+    graph, store = with_guides
+    ev = gather(store, graph, "", TRACEBACK, searcher=None)
+    roles = [p.role for p in ev.pieces]
+    (guide,) = guide_pieces(ev)
+    assert (guide.module, guide.path, guide.label) == ("docs:project", "docs/SUPPORT.md", "Support > Error codes")
+    assert "unpaid invoice" in guide.text
+    assert roles.index("guide") > roles.index("error code")
+    assert not any(p.role == "error code" and p.module == "docs:project" for p in ev.pieces)
+
+
+def test_search_adds_the_best_guides_even_when_a_module_is_chosen(with_guides):
+    graph, store = with_guides
+    searcher = CodeSearcher(FakeEmbedder(), store)
+    for modules in (None, ["demo_shop"]):
+        ev = gather(store, graph, "which carrier is used for the order sync", "", searcher=searcher, modules=modules)
+        assert any(p.module == "docs:project" for p in guide_pieces(ev))
+    ev = gather(store, graph, "which carrier is used for the order sync", "", searcher=searcher)
+    assert not any(p.role == "search" and p.module.startswith("docs:") for p in ev.pieces)
+
+
+def test_guides_are_numbered_and_described_for_the_llm(with_guides):
+    graph, store = with_guides
+    ev = gather(store, graph, "", TRACEBACK, searcher=None)
+    sources, context = build_code_context(ev.pieces)
+    assert any(s.role == "guide" and s.module == "docs:project" for s in sources)
+    assert "docs:project/docs/SUPPORT.md:" in context and "documentation of the repository" in context
+
+
+def test_the_index_of_a_docs_source_is_not_reported_as_missing_from_the_graph(with_guides):
+    from rag.code_lookup import sync_problems
+
+    graph, store = with_guides
+    assert sync_problems(graph, store) == {}
