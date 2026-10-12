@@ -116,3 +116,14 @@ def test_code_is_not_sent_to_an_external_llm_unless_allowed(client, monkeypatch)
 def test_results_event_is_json_per_line(client):
     lines = [line for line in post(client, traceback=TRACEBACK).text.splitlines() if line]
     assert all(isinstance(json.loads(line), dict) for line in lines)
+
+
+def test_evidence_only_request_has_no_llm_no_slot_and_no_provider_guard(client, monkeypatch):
+    monkeypatch.setattr(config, "ANSWERS_PER_HOUR", 1)
+    monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(config, "CODE_EXTERNAL_LLM", False)
+    for _ in range(2):  # the hourly limit counts LLM answers only
+        res = post(client, traceback=TRACEBACK, answer=False)
+        assert res.status_code == 200
+        ev = events(res)
+        assert [e["type"] for e in ev] == ["results"] and ev[0]["pieces"]

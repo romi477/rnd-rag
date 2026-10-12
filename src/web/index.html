@@ -15,11 +15,18 @@
 <main>
   <div class="chrome" id="chrome">
   <header class="top">
-    <h1>Docs Search <span>· R&amp;D Products Documentation</span></h1>
-    <!-- The view belongs to the tab: Search runs queries, Browse lists every article. -->
-    <div class="view-switch" role="group" aria-label="View">
-      <button type="button" id="view-search" aria-pressed="true">Search</button>
-      <button type="button" id="view-browse" aria-pressed="false" title="All articles of the documentation">Browse</button>
+    <h1>Docs Search <span id="subtitle">· R&amp;D Products Documentation</span></h1>
+    <div class="switches">
+      <!-- The mode belongs to the tab: Docs searches the documentation, Code explains a failed job from the code of the modules. -->
+      <div class="view-switch" id="mode-switch" role="group" aria-label="Corpus">
+        <button type="button" id="mode-docs" aria-pressed="true" title="Search the product documentation">Docs</button>
+        <button type="button" id="mode-code" aria-pressed="false" title="Explain a failed job from its traceback and the code of the modules (experimental)">Code</button>
+      </div>
+      <!-- The view belongs to the tab: Search runs queries, Browse lists every article. -->
+      <div class="view-switch docs-only" role="group" aria-label="View">
+        <button type="button" id="view-search" aria-pressed="true">Search</button>
+        <button type="button" id="view-browse" aria-pressed="false" title="All articles of the documentation">Browse</button>
+      </div>
     </div>
     <div class="tools">
       <button type="button" id="clear" class="icon-btn" title="Clear search" aria-label="Clear search">
@@ -47,8 +54,13 @@
       <!-- Never disabled: an Enter pressed right after typing must still submit; run() ignores an empty query. -->
       <button type="submit" id="submit">Find</button>
     </div>
+    <textarea id="trace" class="code-only" rows="5" maxlength="30000" spellcheck="false" aria-label="Traceback"
+      placeholder="Paste the traceback of a failed job (queue.job exc_info). Optional: a question above."></textarea>
     <div class="filters">
-      <label title="Search only the pages of one product (a top-level section of the documentation).">Product <select id="product"><option value="">All</option></select></label>
+      <label class="docs-only" title="Search only the pages of one product (a top-level section of the documentation).">Product <select id="product"><option value="">All</option></select></label>
+      <label class="code-only" title="Search the code only in one module (frames of the traceback are always looked up).">Module <select id="code-module"><option value="">All</option></select></label>
+      <label class="code-only" title="Module version on the client's server: a different version from the indexed one is flagged, as line numbers may not match.">Client version <input id="client-version" type="text" size="10" maxlength="50" placeholder="19.0.2.3.0" autocomplete="off"></label>
+      <label class="code-only" title="Also quote the Confluence pages that match the error message."><input type="checkbox" id="code-docs"> Add documentation</label>
       <span id="browse-count" class="browse-only"></span>
       <span class="llm-group search-only">
         <label id="llm-label" title="Also write an answer from the top pages with the LLM (local LM Studio or the Claude API, set on the server), citing them as [n]. Check the answer against the cited sources."><input type="checkbox" id="llm"> Answer with LLM<span id="llm-provider" class="llm-provider" hidden>via Claude API</span></label>

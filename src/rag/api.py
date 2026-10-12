@@ -203,21 +203,23 @@ class CodeAnswerRequest(BaseModel):
     modules: list[str] = Field(default_factory=list, max_length=20)  # search only these modules
     client_version: str = Field("", max_length=50)  # module version on the client's server
     docs: bool = False  # also quote Confluence pages
+    answer: bool = True  # False: only the evidence (the `results` event), no LLM, no use of the hourly limit
     model: str | None = Field(None, max_length=200)
 
 
 @app.post("/api/code/answer")
 def code_answer(req: CodeAnswerRequest) -> StreamingResponse:
     """Explain a failed job from its traceback and/or a question, as NDJSON events:
-    results (evidence), sources, delta*, done | error."""
+    results (evidence), sources, delta*, done | error. With `answer: false` only `results`."""
     if not req.question.strip() and not req.traceback.strip():
         raise HTTPException(400, "Give a question or a traceback")
-    if reason := external_llm_blocked():
-        raise HTTPException(403, reason)
     searcher = code_searcher()
-    check_model(req.model)  # before the slot: a rejected request must not use up the hourly limit
-    if not take_answer_slot():
-        raise HTTPException(429, f"Too many LLM answers: the limit is {config.ANSWERS_PER_HOUR} per hour (RAG_ANSWERS_PER_HOUR)")
+    if req.answer:
+        if reason := external_llm_blocked():
+            raise HTTPException(403, reason)
+        check_model(req.model)  # before the slot: a rejected request must not use up the hourly limit
+        if not take_answer_slot():
+            raise HTTPException(429, f"Too many LLM answers: the limit is {config.ANSWERS_PER_HOUR} per hour (RAG_ANSWERS_PER_HOUR)")
     graph = CodeGraph.load(graph_path())
     started = time.perf_counter()
     with lock:
@@ -233,6 +235,8 @@ def code_answer(req: CodeAnswerRequest) -> StreamingResponse:
     def events() -> Iterator[str]:
         first = {"type": "results", "took_ms": took_ms} | evidence_dict(ev)
         yield json.dumps(first, ensure_ascii=False) + "\n"
+        if not req.answer:
+            return
         try:  # the LLM runs outside the model lock
             for event in stream_code_answer(req.question, ev, state["llm"], model=req.model or None, pages=pages):
                 yield json.dumps(event, ensure_ascii=False) + "\n"

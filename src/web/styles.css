@@ -251,8 +251,41 @@ details.result:not([open]) { padding-top: 10px; padding-bottom: 10px; }
 @media (max-width: 760px) {
   h1 { white-space: normal; }
   header.top { grid-template-columns: 1fr auto; }
-  .view-switch { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
 }
+
+/* Docs / Code and Search / Browse: the two switches sit side by side in the middle of the header */
+.switches { display: flex; gap: 10px; align-items: center; justify-self: center; }
+@media (max-width: 760px) { .switches { grid-column: 1 / -1; grid-row: 2; justify-self: start; } }
+
+/* Code mode (app.js sets data-mode on <body>): the traceback box and its filters replace the documentation ones */
+body:not([data-mode="code"]) .code-only, body[data-mode="code"] .docs-only { display: none; }
+#trace {
+  grid-column: 1 / -1; width: 100%; min-height: 96px; padding: 8px 12px; resize: vertical; outline: none;
+  font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+}
+#trace:focus, #client-version:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#client-version { padding: 3px 6px; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; outline: none; }
+body[data-mode="code"] .filters { grid-column: 1 / -1; }
+.code-failure { margin: 0 0 12px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.code-failure h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.code-failure pre { margin: 6px 0 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; max-height: 220px; overflow: auto; background: var(--code-bg); border-radius: 6px; }
+.chip { display: inline-block; margin: 0 6px 0 0; padding: 0 8px; font-size: 12px; color: var(--accent); background: var(--accent-soft); border-radius: 999px; white-space: nowrap; }
+.code-note { margin: 8px 0 0; padding: 6px 10px; font-size: 13px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 8px; }
+.frames { margin: 0 0 14px; padding: 0; list-style: none; font-size: 13px; }
+.frames li { display: flex; align-items: baseline; gap: 8px; padding: 3px 8px; border-radius: 6px; overflow-wrap: anywhere; }
+.frames li:hover { background: var(--surface); }
+.frames .loc { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.frames .miss { color: var(--muted); }
+.frames .at { color: var(--muted); }
+.frames a.cite, .code-piece .cite-n { flex: none; }
+.code-piece > summary .loc { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; }
+.code-piece pre {
+  margin: 10px 0 0; padding: 10px 12px; white-space: pre; overflow: auto; max-height: 420px; tab-size: 4;
+  font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code-bg); border-radius: 6px;
+}
+.code-docs { margin: 14px 0 0; font-size: 13px; }
+.code-docs a { color: var(--accent); }
 
 /* The parts of the page that belong to a view (app.js sets data-view on <body>) */
 body[data-view="browse"] .search-only, body:not([data-view="browse"]) .browse-only, body:not([data-view="browse"]) #browse,

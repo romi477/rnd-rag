@@ -19,19 +19,29 @@ let products = null; // product filter options, null until loaded
 // take other modes, for experiments and eval.
 const SEARCH_PARAMS = {mode: "hybrid", rerank: "true"};
 const VIEWS = ["search", "browse"];
+const MODES = ["docs", "code"]; // per tab: the documentation, or the code of the modules (explains a failed job's traceback)
+const TRACE_MAX = 30000; // = the API limit
 const SEARCH_PLACEHOLDER = $("q").placeholder;
+const DOCS_SUBTITLE = $("subtitle").textContent;
+const CODE_PLACEHOLDER = "Optional: a question about the failure…";
+const CODE_DEFAULTS = {trace: "", module: "", version: "", docs: false};
+const CODE_FIELDS = Object.keys(CODE_DEFAULTS);
 let metaError = ""; // the product list could not be loaded
 // Browse: every indexed article (GET /api/pages), loaded once and shared by all tabs.
 let pages = null;
 let pagesError = "";
 let pagesPromise = null;
+// Code mode: the indexed modules (GET /api/code/modules), loaded once like the products.
+let codeModules = null;
+let codeError = "";
+let codeModulesPromise = null;
 
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
 // view: "search" or "browse" (the title filter of the article list is `filter`, kept apart from the query `q`).
 function newTab(init = {}) {
-  return {id: newId(), view: "search", q: "", filter: "", product: "", llm: false, model: "",
-          data: null, answer: null, status: "", error: "", busy: false, ...init};
+  return {id: newId(), mode: "docs", view: "search", q: "", filter: "", product: "", llm: false, model: "",
+          ...CODE_DEFAULTS, data: null, answer: null, status: "", error: "", busy: false, ...init};
 }
 
 const activeTab = () => tabs.find((t) => t.id === activeId);
@@ -96,12 +106,17 @@ window.addEventListener("storage", (e) => {
 // Values from localStorage or a URL may be stale or hand-made.
 function sanitize(t) {
   const tab = {...newTab(), ...t};
-  delete tab.mode; delete tab.rerank; // settings of older versions: the UI no longer offers them
-  if (!VIEWS.includes(tab.view)) tab.view = "search";
-  for (const k of ["q", "filter", "product", "model", "error"]) if (typeof tab[k] !== "string") tab[k] = "";
+  delete tab.rerank; // a setting of older versions (their search `mode` is replaced below: it is not "docs" / "code")
+  if (!MODES.includes(tab.mode)) tab.mode = "docs"; // tabs saved before the Code mode are Docs tabs
+  if (!VIEWS.includes(tab.view) || tab.mode === "code") tab.view = "search";
+  for (const k of ["q", "filter", "product", "model", "error", "trace", "module", "version"]) if (typeof tab[k] !== "string") tab[k] = "";
   tab.q = tab.q.slice(0, 500);
   tab.filter = tab.filter.slice(0, 500);
+  tab.trace = tab.trace.slice(0, TRACE_MAX);
+  tab.version = tab.version.slice(0, 50);
   tab.llm = !!tab.llm;
+  tab.docs = !!tab.docs;
+  if (tab.ran) tab.ran = {mode: "docs", ...CODE_DEFAULTS, ...tab.ran}; // else the new settings would look "changed"
   return tab;
 }
 
@@ -112,6 +127,12 @@ function readForm(tab) {
   if (tab.view === "browse") tab.filter = $("q").value.slice(0, 500);
   else tab.q = $("q").value.trim();
   tab.product = $("product").value;
+  if (tab.mode === "code") {
+    tab.trace = $("trace").value.slice(0, TRACE_MAX);
+    tab.module = $("code-module").value;
+    tab.version = $("client-version").value.trim().slice(0, 50);
+    tab.docs = $("code-docs").checked;
+  }
   tab.llm = $("llm").checked;
   if (llmInfo.checked) tab.model = $("model").value;
 }
@@ -126,14 +147,30 @@ function fillProducts(tab) {
   $("product").value = tab.product;
 }
 
+// Options of the module select, like fillProducts: the tab's own module stays listed until the list is loaded.
+function fillModules(tab) {
+  const list = (codeModules || []).map((m) => m.name);
+  const options = tab.module && !list.includes(tab.module) ? [tab.module, ...list] : list;
+  $("code-module").innerHTML = '<option value="">All</option>' + options.map((m) => `<option>${escapeHtml(m)}</option>`).join("");
+  $("code-module").value = tab.module;
+}
+
 function updatePlaceholder(tab) {
-  $("q").placeholder = tab.view !== "browse" ? SEARCH_PLACEHOLDER
+  $("q").placeholder = tab.mode === "code" ? CODE_PLACEHOLDER
+    : tab.view !== "browse" ? SEARCH_PLACEHOLDER
     : pages ? `Filter ${pages.length} articles by title…` : "Filter articles by title…";
 }
 
 function writeForm(tab) {
   const browse = tab.view === "browse";
   fillProducts(tab);
+  fillModules(tab);
+  $("trace").value = tab.trace;
+  $("client-version").value = tab.version;
+  $("code-docs").checked = tab.docs;
+  for (const mode of MODES) $(`mode-${mode}`).setAttribute("aria-pressed", String(tab.mode === mode));
+  document.body.dataset.mode = tab.mode;
+  $("subtitle").textContent = tab.mode === "code" ? "· Failed job analysis (experimental)" : DOCS_SUBTITLE;
   // a model that no longer exists falls back to the default model
   if (llmInfo.checked && !hasOption("model", tab.model)) tab.model = "";
   $("q").value = browse ? tab.filter : tab.q;
@@ -146,11 +183,14 @@ function writeForm(tab) {
 
 // Only the Find / Ask button runs a query; changing settings just marks the results as outdated.
 // The model matters only when the answer is written by the LLM.
-const SETTINGS = ["q", "product", "llm", "model"];
+const SETTINGS = ["mode", "q", "product", "trace", "module", "version", "docs", "llm", "model"];
 const settingsOf = (tab) => Object.fromEntries(SETTINGS.map((k) => [k, tab[k]]));
 const isStale = (tab) => !!(tab.data && tab.ran && SETTINGS.some((k) => tab.ran[k] !== tab[k] && (k !== "model" || tab.llm)));
 
-const submitLabel = (tab) => (tab.llm && llmInfo.available ? "Ask" : "Find");
+const submitLabel = (tab) => {
+  const llm = tab.llm && llmInfo.available;
+  return tab.mode === "code" ? (llm ? "Explain" : "Analyze") : (llm ? "Ask" : "Find");
+};
 
 function updateSubmitLabel(tab) {
   $("submit").textContent = submitLabel(tab);
@@ -349,6 +389,9 @@ function card(p, ts, open, rank) {
 
 // --- LLM answer ---------------------------------------------------------------
 
+// A page source has a title; a code source is named by where it is.
+const sourceTitle = (src) => src.title || `${src.module}/${src.path}:${src.line_start}-${src.line_end}`;
+
 function inlineMd(text, sources) {
   // Code spans first, into placeholders: their content is literal (no *emphasis*, no [n] links).
   const codes = [];
@@ -358,9 +401,9 @@ function inlineMd(text, sources) {
     // *em*: opens after a space or line start, closes before a space or punctuation, so that
     // "*.pdf and *.xml" stays as typed
     .replace(/(^|[\s(])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?=[\s.,;:!?)]|$)/g, "$1<em>$2</em>")
-    .replace(/\[(\d+)\]/g, (m, n) => {
+    .replace(/\[(?:sources?\s*:?\s*)?(\d+)\]/gi, (m, n) => {  // small models write "[Source 3]"
       const src = sources[n - 1];
-      return src ? `<a class="cite" href="#src-${n}" title="${escapeHtml(src.title)}">${n}</a>` : m;
+      return src ? `<a class="cite" href="#src-${n}" title="${escapeHtml(sourceTitle(src))}">${n}</a>` : m;
     });
   return html.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[i]}</code>`);
 }
@@ -469,10 +512,10 @@ function renderTabs() {
   $("stop").hidden = !activeTab()?.busy; // Stop belongs to the form: it follows the active tab's request
   // Tabs are named by position: Tab1, Tab2...; the query shows in the tooltip.
   $("tabs").innerHTML = tabs.map((t, i) => `
-    <div class="tab${t.id === activeId ? " active" : ""}" data-id="${t.id}" title="${escapeHtml(t.view === "browse" ? `Browse: ${t.filter || "all articles"}` : t.q || "New search")}" role="tab" aria-selected="${t.id === activeId}" tabindex="${t.id === activeId ? 0 : -1}">
+    <div class="tab${t.id === activeId ? " active" : ""}" data-id="${t.id}" title="${escapeHtml(t.mode === "code" ? `Code: ${t.q || (t.trace ? "traceback" : "new analysis")}` : t.view === "browse" ? `Browse: ${t.filter || "all articles"}` : t.q || "New search")}" role="tab" aria-selected="${t.id === activeId}" tabindex="${t.id === activeId ? 0 : -1}">
       ${t.busy ? '<span class="tab-busy" aria-label="loading"></span>' : ""}
       <span class="tab-title">Tab${i + 1}</span>
-      ${t.view === "browse" ? '<span class="tab-model">browse</span>' : t.llm && t.model ? `<span class="tab-model">${escapeHtml(t.model.split("/").pop())}</span>` : ""}
+      ${t.mode === "code" ? '<span class="tab-model">code</span>' : t.view === "browse" ? '<span class="tab-model">browse</span>' : t.llm && t.model ? `<span class="tab-model">${escapeHtml(t.model.split("/").pop())}</span>` : ""}
       ${tabs.length > 1 ? `<button class="tab-close" data-close="${t.id}" aria-label="Close tab" title="Close tab">×</button>` : ""}
     </div>`).join("") +
     '<button class="tab-add" data-add title="New tab" aria-label="New tab">+</button>';
@@ -480,7 +523,7 @@ function renderTabs() {
 
 // A problem the user should notice: the last request of the tab failed, or a list could not be loaded.
 function renderBanner(tab) {
-  const text = (tab.view === "browse" ? pagesError : tab.error) || metaError;
+  const text = tab.mode === "code" ? tab.error || codeError : (tab.view === "browse" ? pagesError : tab.error) || metaError;
   $("banner").textContent = text;
   $("banner").hidden = !text;
 }
@@ -488,7 +531,14 @@ function renderBanner(tab) {
 // Results + answer of a tab (the form is written only on tab switch, so typing isn't clobbered).
 function renderContent(tab) {
   document.body.dataset.view = tab.view; // CSS shows the parts of the page that belong to the view
+  document.body.dataset.mode = tab.mode;
   renderBanner(tab);
+  if (tab.mode === "code") {
+    $("status").textContent = statusText(tab);
+    renderCode(tab.data, tab);
+    renderAnswer(tab.answer);
+    return;
+  }
   if (tab.view === "browse") { renderBrowse(tab); return; }
   $("status").textContent = statusText(tab);
   renderResults(tab.data, tab);
@@ -503,6 +553,87 @@ function renderView() {
   renderContent(tab);
   updateUrl(tab);
   markFilterRows(); // the view shows other filters
+}
+
+// --- Code mode: what a traceback maps to in the code of the modules ---------------------------
+
+const ROLE_LABEL = {frame: "failing frame", caller: "caller", override: "also defined here", abstract: "abstract declaration",
+  "error code": "error code", search: "search"};
+const HINT_CODE = `<div class="hint-empty">
+  <div>Explain a failed job from its traceback.</div>
+  <div class="hint">Paste the traceback of a <code>queue.job</code> above (a question is optional). The frames are looked up in the code of the indexed modules.</div>
+  <div class="hint">Turn on "Answer with LLM" to get an explanation with references to the code.</div>
+</div>`;
+
+const looksLikeTraceback = (text) => /Traceback \(most recent call last\)|File "[^"]+", line \d+/.test(text);
+const pieceKey = (module, path, start, end) => `${module}/${path}:${start}-${end}`;
+const lineRange = (a, b) => (b && b !== a ? `${a}-${b}` : `${a}`);
+
+function codeStatus(data) {
+  const found = data.frames.filter((f) => f.found).length;
+  const frames = data.frames.length ? `${found} of ${data.frames.length} frames found · ` : "";
+  return `${frames}${data.pieces.length} fragment${data.pieces.length === 1 ? "" : "s"} · ${data.took_ms} ms`;
+}
+
+// The sources the LLM got, by where they are: the numbers its [n] citations use.
+function codeNumbers(tab) {
+  const sources = (tab.answer?.sources || []).filter((s) => s.kind === "code");
+  return new Map(sources.map((s) => [pieceKey(s.module, s.path, s.line_start, s.line_end), s.n]));
+}
+
+function failureHtml(data) {
+  const exc = data.exception;
+  const codes = data.error_codes.map((c) => `<span class="chip" title="Error code of the framework">${escapeHtml(c)}</span>`).join("");
+  const notes = data.notes.map((n) => `<div class="code-note">${escapeHtml(n)}</div>`).join("");
+  if (!exc && !codes && !notes) return "";
+  return `<div class="code-failure">
+    ${exc ? `<div class="crumbs">Failure</div><h2>${escapeHtml(exc.name)}</h2>${exc.message ? `<pre>${escapeHtml(exc.message)}</pre>` : ""}` : ""}
+    ${codes ? `<div class="meta">${codes}</div>` : ""}${notes}
+  </div>`;
+}
+
+function framesHtml(data, numbers) {
+  if (!data.frames.length) return "";
+  return `<ol class="frames" aria-label="Frames in the indexed modules, innermost first">${data.frames.map((f) => {
+    if (!f.found) {
+      return `<li class="miss"><span class="loc">${escapeHtml(f.module)}/${escapeHtml(f.path)}:${f.line}</span> in ${escapeHtml(f.func)}
+        <span class="at">not in the indexed code</span></li>`;
+    }
+    const n = numbers.get(pieceKey(f.module, f.path, f.line_start, f.line_end));
+    return `<li><span class="loc">${escapeHtml(f.module)}/${escapeHtml(f.path)}:${lineRange(f.line_start, f.line_end)}</span>
+      ${escapeHtml(f.name)}${f.name_matches ? "" : ` <span class="at">(frame ${escapeHtml(f.func)})</span>`}
+      <span class="at">line ${f.line}</span>${n ? `<a class="cite" href="#src-${n}">${n}</a>` : ""}</li>`;
+  }).join("")}</ol>`;
+}
+
+function pieceHtml(p, i, tab, numbers) {
+  const key = pieceKey(p.module, p.path, p.line_start, p.line_end);
+  const n = numbers.get(key);
+  const sent = !tab.answer || n; // without an answer nothing was "sent": every fragment counts
+  const badge = n ? `<span class="rank-badge src" title="Source ${n} of the answer">${n}</span>`
+    : `<span class="rank-badge" title="${sent ? `Fragment ${i + 1}` : "Not sent to the LLM: over the token budget"}">${sent ? i + 1 : "–"}</span>`;
+  const version = p.module_version ? `<span>${escapeHtml(p.module_version)}</span>` : "";
+  return `<details class="result code-piece" data-page-id="${escapeHtml(key)}"${n ? ` id="src-${n}"` : ""}${isOpen(tab, key, i) ? " open" : ""}>
+    <summary>
+      <h2>${badge}<span class="loc">${escapeHtml(p.module)}/${escapeHtml(p.path)}:${lineRange(p.line_start, p.line_end)}</span></h2>
+      <div class="meta"><span class="chip">${escapeHtml(ROLE_LABEL[p.role] || p.role)}</span><span>${escapeHtml(p.label)}</span>${version}</div>
+    </summary>
+    <pre><code>${escapeHtml(p.text)}</code></pre>
+  </details>`;
+}
+
+function renderCode(data, tab) {
+  if (!data) { $("results").innerHTML = tab.busy || tab.error ? "" : HINT_CODE; return; }
+  const numbers = codeNumbers(tab);
+  const docs = (tab.answer?.sources || []).filter((s) => s.kind === "page");
+  const docsHtml = docs.length ? `<div class="code-docs"><b>Documentation</b>${docs.map((s) => {
+    const href = safeUrl(s.url);
+    return ` <span id="src-${s.n}">[${s.n}] ${href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(s.title)}</a>` : escapeHtml(s.title)}</span>`;
+  }).join("")}</div>` : "";
+  const empty = data.pieces.length ? "" : '<div class="empty">Nothing found in the indexed code for this input.</div>';
+  $("results").classList.toggle("has-sources", numbers.size > 0);
+  $("results").innerHTML = failureHtml(data) + framesHtml(data, numbers) +
+    data.pieces.map((p, i) => pieceHtml(p, i, tab, numbers)).join("") + empty + docsHtml;
 }
 
 // --- Browse: every article, filtered by title as the user types -------------------------
@@ -590,6 +721,40 @@ function loadProducts() {
   return productsPromise;
 }
 
+// The module list of Code mode loads once; a failed load (no code index on the server) is retried when needed again.
+function loadCodeModules() {
+  if (!codeModulesPromise) {
+    codeModulesPromise = (async () => {
+      try {
+        const res = await fetch("/api/code/modules");
+        if (!res.ok) throw await httpError(res);
+        codeModules = (await res.json()).modules || [];
+        codeError = "";
+      } catch (err) {
+        codeError = "Code mode is not available: " + err.message;
+        codeModulesPromise = null;
+      }
+      const tab = activeTab();
+      if (tab?.mode === "code") { readForm(tab); fillModules(tab); renderBanner(tab); }
+    })();
+  }
+  return codeModulesPromise;
+}
+
+// Switch the active tab between the documentation and the code; the question stays, the results do not.
+function setMode(mode) {
+  const tab = activeTab();
+  if (!tab || tab.mode === mode) return;
+  controllers[tab.id]?.abort();
+  delete controllers[tab.id];
+  readForm(tab);
+  Object.assign(tab, {mode, view: "search", data: null, answer: null, status: "", error: "", busy: false, open: {}, ran: null});
+  if (mode === "code") loadCodeModules(); else loadProducts();
+  renderView();
+  save();
+  $(mode === "code" ? "trace" : "q").focus();
+}
+
 // Switch the active tab between searching and browsing; each view keeps the text typed in it.
 function setView(view) {
   const tab = activeTab();
@@ -605,6 +770,13 @@ function setView(view) {
 }
 
 function updateUrl(tab) {
+  if (tab.mode === "code") {  // the traceback is too long for a link: only the question and the module
+    const params = new URLSearchParams({mode: "code"});
+    if (tab.q) params.set("q", tab.q);
+    if (tab.module) params.set("module", tab.module);
+    history.replaceState(null, "", "?" + params);
+    return;
+  }
   if (tab.view === "browse") {
     const params = new URLSearchParams({view: "browse"});
     if (tab.product) params.set("product", tab.product);
@@ -667,8 +839,9 @@ function clearResults() {
   }
   controllers[tab.id]?.abort();
   delete controllers[tab.id];
-  Object.assign(tab, {q: "", data: null, answer: null, status: "", error: "", busy: false, open: {}});
+  Object.assign(tab, {q: "", trace: "", data: null, answer: null, status: "", error: "", busy: false, open: {}});
   $("q").value = "";
+  $("trace").value = "";
   renderTabs();
   renderContent(tab);
   updateUrl(tab);
@@ -706,36 +879,58 @@ async function httpError(res) {
   return new Error(`${res.status}: ${detail}`.slice(0, 300));
 }
 
+// The events after the evidence, shared by the documentation and the code answers: delta* -> done | error.
+function applyAnswerEvent(tab, ev) {
+  const a = tab.answer;
+  if (ev.type === "delta") {
+    a.text += ev.text;
+    if (isActive(tab)) renderAnswerText(a);
+    saveSoon();
+    return;
+  }
+  if (ev.type === "sources") a.sources = ev.sources;
+  else if (ev.type === "done") {
+    a.streaming = false;
+    a.model = ev.model || a.model;
+    a.footer = ev.model ? `${(ev.took_ms / 1000).toFixed(1)} s · based on ${a.sources.length} source${a.sources.length === 1 ? "" : "s"}` : "";
+    a.usage = ev.usage || null;
+    a.firstTokenMs = ev.first_token_ms ?? null;
+    if (ev.truncated) a.error = "The answer was cut off: it reached the max_tokens limit (RAG_LLM_MAX_TOKENS).";
+  } else if (ev.type === "error") { a.streaming = false; a.error = "LLM error: " + ev.message; }
+  if (!isActive(tab)) return;
+  renderAnswer(a);
+  if (ev.type === "sources") { if (tab.mode === "code") renderCode(tab.data, tab); else markSources(a.sources); }
+}
+
 async function runAnswer(tab, params, signal) {
   if (tab.model) params.set("model", tab.model);
   const res = await fetch("/api/answer?" + params, {signal});
   if (!res.ok) throw await httpError(res);
-  const a = tab.answer;
   await readNdjson(res, (ev) => {
-    if (ev.type === "results") {
-      tab.data = ev;
-      tab.status = statusOf(ev);
-      if (isActive(tab)) { $("status").textContent = tab.status; renderResults(ev, tab); }
-      return;
-    }
-    if (ev.type === "delta") {
-      a.text += ev.text;
-      if (isActive(tab)) renderAnswerText(a);
-      saveSoon();
-      return;
-    }
-    if (ev.type === "sources") a.sources = ev.sources;
-    else if (ev.type === "done") {
-      a.streaming = false;
-      a.model = ev.model || a.model;
-      a.footer = ev.model ? `${(ev.took_ms / 1000).toFixed(1)} s · based on ${a.sources.length} source${a.sources.length === 1 ? "" : "s"}` : "";
-      a.usage = ev.usage || null;
-      a.firstTokenMs = ev.first_token_ms ?? null;
-      if (ev.truncated) a.error = "The answer was cut off: it reached the max_tokens limit (RAG_LLM_MAX_TOKENS).";
-    } else if (ev.type === "error") { a.streaming = false; a.error = "LLM error: " + ev.message; }
-    if (isActive(tab)) { renderAnswer(a); if (ev.type === "sources") markSources(a.sources); }
+    if (ev.type !== "results") { applyAnswerEvent(tab, ev); return; }
+    tab.data = ev;
+    tab.status = statusOf(ev);
+    if (isActive(tab)) { $("status").textContent = tab.status; renderResults(ev, tab); }
   });
+  const a = tab.answer;
   if (a.streaming) { a.streaming = false; a.error = "The connection closed before the answer was complete."; }
+}
+
+// Code mode: the evidence for the traceback arrives first; with the LLM on, the explanation streams after it.
+async function runCode(tab, useLlm, signal) {
+  const body = {question: tab.q, traceback: tab.trace, modules: tab.module ? [tab.module] : [],
+    client_version: tab.version, docs: tab.docs, answer: useLlm};
+  if (useLlm && tab.model) body.model = tab.model;
+  const res = await fetch("/api/code/answer", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), signal});
+  if (!res.ok) throw await httpError(res);
+  await readNdjson(res, (ev) => {
+    if (ev.type !== "results") { applyAnswerEvent(tab, ev); return; }
+    tab.data = ev;
+    tab.status = codeStatus(ev);
+    if (isActive(tab)) { $("status").textContent = tab.status; renderCode(ev, tab); }
+  });
+  const a = tab.answer;
+  if (a?.streaming) { a.streaming = false; a.error = "The connection closed before the answer was complete."; }
 }
 
 // Stop the request of the active tab. What has streamed so far stays on the screen.
@@ -757,8 +952,9 @@ async function run() {
   const tab = activeTab();
   if (!tab || tab.view === "browse") return; // Browse filters as the user types: Enter has nothing to run
   readForm(tab);
-  if (!tab.q) return;
-  loadProducts(); // retried here if the first load failed
+  const code = tab.mode === "code";
+  if (code ? !tab.q && !tab.trace.trim() : !tab.q) return;
+  if (code) loadCodeModules(); else loadProducts(); // retried here if the first load failed
   const useLlm = tab.llm && llmInfo.available;
   const params = new URLSearchParams({q: tab.q, ...SEARCH_PARAMS});
   if (tab.product) params.set("product", tab.product);
@@ -771,7 +967,9 @@ async function run() {
   renderContent(tab);
   updateUrl(tab);
   try {
-    if (useLlm) {
+    if (code) {
+      await runCode(tab, useLlm, controller.signal);
+    } else if (useLlm) {
       await runAnswer(tab, params, controller.signal);
     } else {
       const res = await fetch("/api/search?" + params, {signal: controller.signal});
@@ -825,19 +1023,26 @@ const flag = (v, fallback) => (v === null ? fallback : ["1", "true", "yes", "on"
 function openFromUrl() {
   const params = new URLSearchParams(location.search);
   const browse = params.get("view") === "browse";
-  if (!browse && !params.get("q")) return false;
-  const wanted = browse
+  const code = params.get("mode") === "code";
+  if (!browse && !code && !params.get("q")) return false;
+  const wanted = code
+    ? sanitize({mode: "code", q: (params.get("q") || "").trim(), module: params.get("module") || ""})
+    : browse
     ? sanitize({view: "browse", product: params.get("product") || "", filter: params.get("filter") || ""})
     : sanitize({q: params.get("q").trim(), product: params.get("product") || "", llm: flag(params.get("llm"), false),
         model: params.get("model") || ""}); // mode / rerank in older links are ignored
-  const same = browse
-    ? (t) => t.view === "browse" && t.product === wanted.product && t.filter === wanted.filter
-    : (t) => t.view === "search" && SETTINGS.every((k) => t[k] === wanted[k] || (k === "model" && !t.llm));
+  const same = code
+    ? (t) => t.mode === "code" && t.q === wanted.q && t.module === wanted.module
+    : browse
+    ? (t) => t.mode === "docs" && t.view === "browse" && t.product === wanted.product && t.filter === wanted.filter
+    : (t) => t.mode === "docs" && t.view === "search" &&
+        SETTINGS.every((k) => t[k] === wanted[k] || (k === "model" && !t.llm) || CODE_FIELDS.includes(k));
+  const runs = code ? !!wanted.q : !browse; // a link to Code mode runs only when it carries a question
   const existing = [activeTab(), ...tabs].find((t) => t && same(t));
-  if (existing) { activeId = existing.id; return !browse && !existing.data; }
+  if (existing) { activeId = existing.id; return runs && !existing.data; }
   tabs.push(wanted);
   activeId = wanted.id;
-  return !browse;
+  return runs;
 }
 
 async function init() {
@@ -851,6 +1056,7 @@ async function init() {
   markFilterRows();
   refreshLlmStatus(); // LM Studio may be slow to answer: don't wait for it
   if (activeTab().view === "browse") loadPages();
+  if (activeTab().mode === "code") loadCodeModules();
   await loadProducts();
   if (runNow) run();
 }
@@ -859,6 +1065,30 @@ $("form").addEventListener("submit", (e) => { e.preventDefault(); run(); });
 $("stop").addEventListener("click", stopRun);
 $("clear").addEventListener("click", clearResults);
 for (const view of VIEWS) $(`view-${view}`).addEventListener("click", () => setView(view));
+for (const mode of MODES) $(`mode-${mode}`).addEventListener("click", () => setMode(mode));
+$("trace").addEventListener("input", () => {  // saved without the settings round trip: a traceback is long
+  const tab = activeTab();
+  if (!tab) return;
+  tab.trace = $("trace").value.slice(0, TRACE_MAX);
+  $("status").textContent = statusText(tab);
+  saveSoon();
+});
+$("trace").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run(); }
+});
+// A traceback pasted into the documentation search box (it holds 500 characters) opens Code mode with it.
+$("q").addEventListener("paste", (e) => {
+  const tab = activeTab();
+  const text = e.clipboardData?.getData("text") || "";
+  if (!tab || tab.mode !== "docs" || tab.view !== "search" || !looksLikeTraceback(text)) return;
+  e.preventDefault();
+  setMode("code");
+  tab.trace = text.slice(0, TRACE_MAX);
+  tab.status = "That looks like a traceback: opened in Code mode.";
+  $("trace").value = tab.trace;
+  renderContent(tab);
+  save();
+});
 $("results").addEventListener("click", (e) => {
   if (!e.target.closest("[data-browse]")) return;
   e.preventDefault();
@@ -888,7 +1118,8 @@ $("theme").addEventListener("click", toggleTheme);
 }
 systemDark.addEventListener("change", () => { if (!savedTheme()) applyTheme(); });
 window.addEventListener("storage", (e) => { if (e.key === THEME_KEY) applyTheme(); });
-["product", "llm", "model"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
+["product", "llm", "model", "code-module", "code-docs"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
+$("client-version").addEventListener("input", onSettingsChange);
 $("tabs").addEventListener("click", (e) => {
   const close = e.target.closest("[data-close]");
   if (close) { e.stopPropagation(); closeTab(close.dataset.close); return; }
