@@ -126,5 +126,12 @@ def products() -> list[str]:
     return state["searcher"].products()
 
 
+@app.get("/api/pages")
+def pages() -> dict:
+    """Every indexed page with its Confluence link, sorted by product and path."""
+    pages = state["searcher"].pages()
+    return {"count": len(pages), "pages": pages}
+
+
 # Mounted last so that /api/* routes take precedence.
 app.mount("/", StaticFiles(directory=config.WEB_DIR, html=True), name="web")

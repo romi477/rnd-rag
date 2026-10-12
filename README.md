@@ -133,6 +133,17 @@ Models are cached in `~/.cache/huggingface` (override with `HF_HOME`). After the
 
 ## API
 
+JSON over HTTP, served by `scripts/serve.sh` next to the UI (no auth: the server answers only to the
+host names in `RAG_ALLOWED_HOSTS`, and sends no CORS headers, so other web pages can't call it from a browser).
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/search` | pages ranked for a query, with their best fragments |
+| `GET /api/answer` | the same search, then an LLM answer with [n] citations, streamed as NDJSON |
+| `GET /api/llm` | whether answer generation is available, the default and all chat models |
+| `GET /api/products` | the values for the `product` filter |
+| `GET /api/pages` | every indexed page with its Confluence link |
+
 `GET /api/search?q=...&k=10&mode=hybrid|vector|fts&product=...&rerank=false`
 
 Quotes and backslashes in `q` are ignored by the BM25 side (no phrase queries); if the BM25 index is
@@ -144,7 +155,9 @@ missing (an interrupted rebuild), hybrid search falls back to vectors only.
   "results": [{
     "page_id": "...", "title": "...", "url": "...", "product": "...", "breadcrumbs": ["..."],
     "updated": "...", "labels": [], "score": 0.93, "low_relevance": false,
-    "chunks": [{"chunk_id": "...", "section_path": ["..."], "text": "...", "score": 0.021}]
+    "chunks": [{"chunk_id": "...", "section_path": ["..."], "text": "...", "score": 0.93,
+                "signals": {"vector": {"rank": 1, "score": 0.71}, "fts": {"rank": 3, "score": 9.4},
+                            "rrf": 0.021, "retrieval_rank": 1, "rerank": 0.93}}]
   }]
 }
 ```
@@ -167,6 +180,13 @@ early, or an answer with no text (a reasoning model that spent the budget thinki
 `GET /api/llm` reports whether answer generation is available, the default model and all chat
 models with their load state (`{"available", "model", "models": [{"id", "loaded"}], "error"}`).
 `GET /api/products` lists the values for the `product` filter.
+`GET /api/pages` lists every indexed page with its Confluence link, sorted by product and path
+(pages without text, e.g. section pages that only list their children, are not indexed):
+
+```json
+{"count": 242, "pages": [{"page_id": "...", "title": "...", "url": "https://...", "product": "...",
+                          "breadcrumbs": ["..."], "updated": "...", "labels": ["..."]}]}
+```
 
 ## Evaluation
 

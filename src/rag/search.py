@@ -75,6 +75,9 @@ class Searcher:
     def products(self) -> list[str]:
         return self.store.products()
 
+    def pages(self) -> list[dict]:
+        return self.store.pages()
+
     def search(
         self,
         query: str,

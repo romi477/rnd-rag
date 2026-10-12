@@ -66,6 +66,17 @@ def test_products(store):
     assert store.products() == ["Direct Print", "E-commerce", "ZPL Label Designer"]
 
 
+def test_pages_lists_each_page_once(store):
+    long = page("4", "Long printer guide", "\n\n".join(f"## Part {i}\n\n" + "printer " * 300 for i in range(3)), "Direct Print")
+    chunks = chunk_page(long)
+    assert len(chunks) > 1
+    store.upsert_pages(chunks, vectors(chunks))
+    pages = store.pages()
+    assert [p["page_id"] for p in pages] == ["4", "1", "3", "2"]  # by product, then title
+    assert pages[1] == {"page_id": "1", "title": "Printer setup", "url": "https://x/1", "product": "Direct Print",
+                        "breadcrumbs": ["Direct Print"], "updated": "2026-01-01", "labels": []}
+
+
 @pytest.mark.parametrize("mode", ["fts", "vector", "hybrid"])
 def test_search_modes_find_expected_page(store, mode):
     searcher = Searcher(FakeEmbedder(), store=store)

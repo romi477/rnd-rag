@@ -691,14 +691,31 @@ document.addEventListener("toggle", (e) => {
   } else return;
   save();
 }, true);
-// A citation [n] expands the source card it jumps to.
+// A citation [n] expands the source card and scrolls to it smoothly (the gap above it is the
+// card's scroll-margin-top); the URL keeps no #src-n, so a reload doesn't jump.
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 $("answer").addEventListener("click", (e) => {
   const cite = e.target.closest("a.cite");
   const target = cite && document.querySelector(cite.getAttribute("href"));
-  if (target) target.open = true;
+  if (!target) return;
+  e.preventDefault();
+  document.querySelectorAll(".result.cited").forEach((el) => el.classList.remove("cited"));
+  target.classList.add("cited");
+  target.open = true;
+  target.scrollIntoView({behavior: reducedMotion.matches ? "auto" : "smooth", block: "start"});
+  target.querySelector("summary")?.focus({preventScroll: true});
 });
 // Models may be loaded in LM Studio after the page was opened.
 $("llm-label").addEventListener("mouseenter", refreshLlmStatus);
+$("refresh-models").addEventListener("click", async () => {
+  const button = $("refresh-models");
+  button.classList.add("spinning");
+  try {  // spin at least one turn, so a fast answer still shows that something happened
+    await Promise.all([refreshLlmStatus(), new Promise((r) => setTimeout(r, 600))]);
+  } finally {
+    button.classList.remove("spinning");
+  }
+});
 document.addEventListener("keydown", (e) => {
   if (e.key === "/" && document.activeElement !== $("q")) { e.preventDefault(); $("q").focus(); }
 });

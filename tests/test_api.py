@@ -20,6 +20,10 @@ class FakeSearcher:
     def products(self):
         return ["Printing"]
 
+    def pages(self):
+        return [{"page_id": "1", "title": "Install", "url": "https://x/1", "product": "Printing",
+                 "breadcrumbs": ["Printing"], "updated": "2026", "labels": []}]
+
 
 class FakeLLM:
     def __init__(self, models=("m1",), down=False):
@@ -56,6 +60,7 @@ def test_search_and_products(client):
     res = client.get("/api/search", params={"q": "install"})
     assert res.status_code == 200 and res.json()["results"][0]["page_id"] == "1"
     assert client.get("/api/products").json() == ["Printing"]
+    assert client.get("/api/pages").json() == {"count": 1, "pages": api.state["searcher"].pages()}
 
 
 def test_bad_mode_is_400(client):

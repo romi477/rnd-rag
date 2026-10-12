@@ -106,6 +106,14 @@ class Store:
     def count(self) -> int:
         return self.table.count_rows() if self.exists() else 0
 
+    def pages(self) -> list[dict]:
+        """One entry per indexed page (pages without text are not indexed), by product and path."""
+        if not self.exists():
+            return []
+        cols = ["page_id", "title", "url", "product", "breadcrumbs", "updated", "labels"]
+        pages = {r["page_id"]: r for r in self.table.to_arrow().select(cols).to_pylist()}
+        return sorted(pages.values(), key=lambda p: (p["product"], p["breadcrumbs"], p["title"]))
+
     def products(self) -> list[str]:
         if not self.exists():
             return []

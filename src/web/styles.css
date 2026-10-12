@@ -101,7 +101,9 @@ a.cite {
   color: var(--accent); background: var(--accent-soft); text-decoration: none;
 }
 a.cite:hover { background: var(--accent); color: var(--surface); }
-.result:target { box-shadow: 0 0 0 2px var(--accent); }
+/* The card a citation [n] jumped to: outlined, and stopping 10px below the top of the window */
+.result.cited { box-shadow: 0 0 0 2px var(--accent); }
+.result { scroll-margin-top: 10px; }
 @keyframes blink { to { visibility: hidden; } }
 @keyframes fade { from { opacity: .4; } to { opacity: 1; } }
 
@@ -154,6 +156,10 @@ a.cite:hover { background: var(--accent); color: var(--surface); }
 }
 .filters > .row-start::before { display: none; }
 #product { max-width: 160px; }
+#refresh-models { width: 24px; height: 24px; }
+#refresh-models.spinning svg { animation: spin .6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { #refresh-models.spinning svg { animation: none; } }
 #model { max-width: 180px; }
 .answer-model { text-transform: none; letter-spacing: 0; color: var(--accent); }
 
