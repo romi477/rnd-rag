@@ -488,6 +488,57 @@ def eval_traces(
                 )
 
 
+@app.command("bench-traces")
+def bench_traces(
+    models: list[str] = typer.Argument(None, help="LLM ids to compare (default: the loaded one)"),
+    file: Path = typer.Option(config.TRACES_FILE, help="YAML list of traceback cases"),
+    group: str | None = typer.Option(None, help="Only the cases of this group (real, synthetic, message, drift...)"),
+    limit: int = typer.Option(0, help="Only the first N cases (0: all)"),
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+    out: Path = typer.Option(None, help="Report path (default: data/bench/traces-<time>.md)"),
+) -> None:
+    """Compare LLMs on the failure cases: the same evidence and prompt, answers side by side in a report."""
+    from rag.code_answer import external_llm_blocked
+    from rag.code_graph import CodeGraph, graph_path
+    from rag.code_search import CodeSearcher
+    from rag.code_store import CodeStore
+    from rag.llm import LLMError, make_llm
+    from rag.store import store_path
+    from rag.trace_bench import default_report_path, render_report, run_trace_bench
+    from rag.trace_eval import load_cases
+
+    if reason := external_llm_blocked():
+        fail(reason)
+    if not file.exists():
+        fail(f"{file} not found: copy eval/traces.example.yaml and describe your cases")
+    graph, store = CodeGraph.load(graph_path()), CodeStore(store_path(model))
+    if not graph.modules or not store.exists():
+        fail("No code index; add modules with `rag module add` first")
+    cases = [c for c in load_cases(file) if group is None or c.group == group]
+    cases = cases[:limit] if limit else cases
+    if not cases:
+        fail("No cases selected")
+    llm = make_llm()
+    try:
+        models = list(models or [llm.resolve_model()])
+    except LLMError as exc:
+        fail(f"LLM: {exc}")
+    path = out or default_report_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    settings = f"{len(cases)} cases from {file.name}, embedding {model}, context {config.CODE_CONTEXT_TOKENS} tokens"
+    typer.echo(f"{settings}; models: {', '.join(models)}")
+    searcher = CodeSearcher(make_embedder(model), store)
+    try:
+        items = run_trace_bench(
+            cases, models, store, graph, searcher, llm, log=typer.echo,
+            on_item=lambda items: path.write_text(render_report(items, models, settings, partial=True)),
+        )
+    except (LLMError, KeyboardInterrupt) as exc:
+        fail(f"stopped: {exc or 'interrupted'}; the report so far is in {path}")
+    path.write_text(render_report(items, models, settings))
+    typer.echo(f"report: {path}")
+
+
 @app.command()
 def bench(
     models: list[str] = typer.Argument(None, help="LLM ids to compare (default: the loaded one)"),

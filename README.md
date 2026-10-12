@@ -217,7 +217,13 @@ scripts/module.sh chain sale.order action_confirm    # every definition of a met
 scripts/module.sh adapters export_inventory          # abstract adapter method and each connector's implementation
 scripts/search.sh "ensureSettings" --corpus code     # hybrid search over code units (--module M, --mode fts|vector)
 scripts/trace.sh traceback.txt --client-version X    # frames -> functions, overrides, error codes (exact lookups)
+scripts/eval-traces.sh --misses                      # does the evidence contain the function the failure comes from? (eval/traces.yaml)
+scripts/bench-traces.sh MODEL [MODEL...] --group real  # same evidence and prompt to several local LLMs, report in data/bench/
 ```
+
+The web UI has a Docs / Code switch per tab: Code takes a pasted traceback, shows the frames mapped to code and, with
+"Answer with LLM", an explanation citing the code as `[n]`. Source code is not sent to the Claude API unless
+`RAG_CODE_EXTERNAL_LLM=1`. `eval/traces.yaml` is git-ignored; start from `eval/traces.example.yaml`.
 
 The graph and the chains come from static analysis: a dynamic `_inherit` or a call by a string name is not seen.
 
