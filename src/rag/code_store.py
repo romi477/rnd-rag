@@ -133,6 +133,12 @@ class CodeStore:
         merge = table.merge_insert("row_id").when_matched_update_all().when_not_matched_insert_all()
         merge.when_not_matched_by_source_delete(f"module = {sql_str(module)}").execute(data)
 
+    def rows_where(self, where: str, columns: list[str], limit: int = 1000) -> list[dict]:
+        """Rows matching a SQL filter, no ranking: exact lookups by module, path, line or text."""
+        if not self.exists():
+            return []
+        return self.table.search().where(where).select(columns).limit(limit).to_list()
+
     def delete_module(self, module: str) -> None:
         if self.exists():
             self.table.delete(f"module = {sql_str(module)}")

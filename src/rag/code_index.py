@@ -12,7 +12,7 @@ from rag.code_store import CodeStore, identifier_words
 from rag.sources.odoo_module import CodeUnit
 
 # Bump when splitting or the row layout changes: modules added before must then be added again.
-CODE_INDEX_VERSION = 2
+CODE_INDEX_VERSION = 3
 PART_SUFFIX = " (part 99/99)"
 
 
@@ -23,8 +23,8 @@ class CodeIndexError(RuntimeError):
 def split_unit(unit: CodeUnit, max_tokens: int) -> list[CodeUnit]:
     """Parts of at most `max_tokens` (approximate): cut at a blank line when one is in the second half of the part.
 
-    The first line of `embed_text` (module > model > name) is repeated in every part. Only a method's text is
-    its source lines, so only its parts get their own line ranges; other kinds keep the unit's whole range.
+    The first line of `embed_text` (module > model > name) is repeated in every part. Only a method's or class header's text
+    is its source lines, so only their parts get their own line ranges; other kinds keep the unit's whole range.
     """
     if approx_tokens(unit.embed_text) <= max_tokens:
         return [unit]
@@ -49,7 +49,7 @@ def split_unit(unit: CodeUnit, max_tokens: int) -> list[CodeUnit]:
     if cur:
         groups.append(cur)
 
-    aligned = unit.kind == "method" and unit.text == body
+    aligned = unit.kind in ("method", "class") and unit.text == body
     parts = []
     for n, group in enumerate(groups, 1):
         text = "\n".join(t for _, t in group)

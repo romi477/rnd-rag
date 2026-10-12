@@ -204,6 +204,23 @@ models with their load state (`{"available", "model", "models": [{"id", "loaded"
                           "breadcrumbs": ["..."], "updated": "...", "labels": ["..."]}]}
 ```
 
+## Code corpus (experimental, branch `feat/code-search`)
+
+A second index next to the Confluence one: units of Odoo addons (manifest, model cards with field help, methods,
+views, data records, docs), plus a graph of dependencies and overrides. Nothing leaves the machine, and the code lives
+only in `data/` (git-ignored).
+
+```bash
+scripts/module.sh add /path/to/addon --ref 19.0      # read from a git ref, never the working tree; parse, graph, embed
+scripts/module.sh list                               # modules in the graph, dependencies first
+scripts/module.sh chain sale.order action_confirm    # every definition of a method across modules, base first
+scripts/module.sh adapters export_inventory          # abstract adapter method and each connector's implementation
+scripts/search.sh "ensureSettings" --corpus code     # hybrid search over code units (--module M, --mode fts|vector)
+scripts/trace.sh traceback.txt --client-version X    # frames -> functions, overrides, error codes (exact lookups)
+```
+
+The graph and the chains come from static analysis: a dynamic `_inherit` or a call by a string name is not seen.
+
 ## Evaluation
 
 `eval/queries.yaml` is a golden set of questions with the page ids that answer them.

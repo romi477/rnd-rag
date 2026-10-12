@@ -67,6 +67,23 @@ class ShopClient(AbsApiClient):
         return []
 '''
 
+REGISTRY_PY = '''class ErrorStore:
+    """Registry of coded errors."""
+
+    CODES = {
+        'E514': 'unpaid invoice',  # soft failure
+        'E516': 'no done picking',
+    }
+
+    def raise_error(self, code):
+        raise ValueError(code)
+
+
+class JustMethods:
+    def run(self):
+        return 1
+'''
+
 VIEWS_XML = """<?xml version="1.0" encoding="utf-8"?>
 <odoo>
     <record id="view_order_form" model="ir.ui.view">
@@ -108,6 +125,7 @@ def module(tmp_path) -> Path:
     write(root, "api/abstract.py", ABSTRACT_PY)
     write(root, "api/shop_client.py", SHOP_CLIENT_PY)
     write(root, "views/order_views.xml", VIEWS_XML)
+    write(root, "exceptions.py", REGISTRY_PY)
     write(root, "README.rst", README_RST)
     write(root, "static/description/index.html", INDEX_HTML)
     write(root, "tests/test_order.py", "def test_x():\n    assert True\n")
@@ -256,3 +274,16 @@ def test_cli_inspect_counts_units_and_dumps_json(module, tmp_path):
     dumped = json.loads(out.read_text())
     assert {u["kind"] for u in dumped} >= {"manifest", "model", "method", "view", "data", "doc"}
     assert all("id" in u for u in dumped)
+
+
+def test_plain_class_with_attributes_gets_a_class_unit_up_to_its_first_method(module):
+    classes = by_kind(units(module), "class")
+    assert [c.name for c in classes] == ["ErrorStore"]  # JustMethods and the AbsApiClient have no header worth a unit
+    (reg,) = classes
+    assert (reg.path, reg.line_start, reg.line_end) == ("exceptions.py", 1, 7)
+    assert "'E514': 'unpaid invoice',  # soft failure" in reg.text and "def raise_error" not in reg.text
+    assert reg.embed_text.startswith("demo_core > ErrorStore")
+
+
+def test_model_classes_get_no_class_unit(module):
+    assert all(c.name != "SaleOrder" for c in by_kind(units(module), "class"))

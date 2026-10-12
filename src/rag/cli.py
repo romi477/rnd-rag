@@ -223,6 +223,59 @@ def module_adapters(method: str) -> None:
 
 
 @app.command()
+def trace(
+    file: Path = typer.Argument(None, help="File with the traceback; omit to read stdin"),
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+    client_version: str = typer.Option("", help="Module version on the client's server, to warn when it differs"),
+    show_text: bool = typer.Option(False, "--text", help="Print the code of each frame"),
+) -> None:
+    """Map a traceback to the indexed code: functions, overrides, error codes. Exact lookups, no model needed."""
+    import sys
+
+    from rag.code_graph import CodeGraph, graph_path
+    from rag.code_lookup import find_error_code, related_methods, resolve_frames
+    from rag.code_store import CodeStore
+    from rag.store import store_path
+    from rag.traceback import parse_traceback, semantic_query, version_note
+
+    graph = CodeGraph.load(graph_path())
+    store = CodeStore(store_path(model))
+    if not graph.modules or not store.exists():
+        fail("No code index; add modules with `rag module add` first")
+    text = file.read_text() if file else sys.stdin.read()
+    tb = parse_traceback(text, set(graph.modules))
+    if not tb.frames and not tb.exception:
+        fail("No traceback found in the input")
+    if tb.exception:
+        typer.echo(f"{tb.exception.name}: {textwrap.shorten(tb.exception.message, 200)}")
+    visible = {f.module for f in tb.own_frames}
+    typer.echo(f"{len(tb.frames)} frames, {len(tb.own_frames)} in indexed modules (innermost first)")
+    for hit in resolve_frames(store, tb):
+        f = hit.frame
+        if not hit.found:
+            typer.echo(f"  {f.module}/{f.rel}:{f.line} in {f.func}: no indexed unit contains this line")
+            continue
+        note = "" if hit.name_matches else f"  (inside {hit.name})"
+        typer.secho(f"  {f.module}/{f.rel}:{hit.line_start}-{hit.line_end}  {hit.model or '-'}.{hit.name}  at line {f.line}{note}", bold=True)
+        related = related_methods(graph, hit, visible)
+        for m in related.chain:
+            typer.echo(f"      also: {m.module}/{m.path}:{m.line_start}-{m.line_end}" + ("  [super]" if m.calls_super else ""))
+        for m in related.abstract:
+            typer.echo(f"      abstract: {m.module}/{m.path}:{m.line_start}-{m.line_end}")
+        if show_text:
+            typer.echo(textwrap.indent(hit.text, "      | "))
+    for code in tb.error_codes:
+        typer.echo(f"error code {code}:")
+        for u in find_error_code(store, code) or []:
+            typer.echo(f"  {u.kind} {u.module}/{u.path}:{u.line_start}-{u.line_end}  {u.name}")
+    versions = {m.name: m.version for m in graph.modules.values()}
+    for module in sorted(visible):
+        if note := version_note(client_version, versions[module]):
+            typer.echo(f"{module}: {note}")
+    typer.echo(f"search query: {semantic_query(tb)}")
+
+
+@app.command()
 def sync(
     space: str = typer.Option(config.SPACE_KEY, help="Confluence space key"),
     attachments: bool = typer.Option(False, help="Also download page attachments"),

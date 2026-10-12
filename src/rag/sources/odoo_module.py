@@ -32,7 +32,7 @@ TEXT_ATTRS = ("string", "help", "placeholder", "title", "confirm", "alt", "label
 
 @dataclass
 class CodeUnit:
-    kind: str  # manifest | model | method | view | data | doc
+    kind: str  # manifest | model | class | method | view | data | doc
     module: str
     module_version: str
     origin: str  # core | connector | customer
@@ -278,6 +278,21 @@ def python_units(module: str, version: str, origin: str, rel: str, source: str) 
             f"{module} > {owner} > {func.name}\n{text}", extra,
         )
 
+    def class_header_unit(cls: ast.ClassDef, bases: list[str]) -> CodeUnit | None:
+        """A plain class's docstring and attributes (a registry dict, constants) up to its first method."""
+        methods = functions(cls.body)
+        stop = min([m.lineno for m in methods] + [d.lineno for m in methods for d in m.decorator_list], default=cls.end_lineno + 1)
+        end = stop - 1
+        while end > cls.lineno and not lines[end - 1].strip():
+            end -= 1
+        if end == cls.lineno:
+            return None  # `class X:` and nothing else before the methods
+        text = cut(lines, cls.lineno, end)
+        return CodeUnit(
+            "class", module, version, origin, "", cls.name, rel, cls.lineno, end, text,
+            f"{module} > {cls.name}\n{text}", {"class_name": cls.name, "bases": bases},
+        )
+
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             attrs = class_attrs(node)
@@ -290,6 +305,8 @@ def python_units(module: str, version: str, origin: str, rel: str, source: str) 
                     card, f"{module} > {model}\n{card}",
                     {"extends": extends, "class_name": node.name, "bases": bases},
                 ))
+            elif unit := class_header_unit(node, bases):
+                units.append(unit)
             units += [method_unit(f, model, node, bases) for f in functions(node.body)]
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             units.append(method_unit(node, "", None, []))
