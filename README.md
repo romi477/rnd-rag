@@ -1,10 +1,12 @@
 # rnd-rag
 
 Local RAG over a Confluence space: hybrid retrieval (BM25 + embeddings), optional answers with
-citations from a local LLM, and a small web UI.
-Everything runs on your machine: documents, index and models never leave it.
+citations from an LLM (local in LM Studio, or the Claude API), and a small web UI.
+Search runs on your machine: documents, index and embedding models never leave it. With the Claude API
+as the LLM, each answer sends the question and the top doc excerpts to Anthropic.
 
-**Status:** stage 1 (retrieval + search UI) and stage 2 (LLM answers with citations) are done.
+**Status:** stage 1 (retrieval + search UI) and stage 2 (LLM answers with citations) are done; stage 4 adds
+the Claude API as an alternative LLM (`RAG_LLM_PROVIDER=anthropic`).
 
 ## How it works
 
@@ -26,7 +28,7 @@ Confluence ──sync──▶ raw-data/          markdown + metadata per page (
                        ──▶ group chunks by page ──▶ web UI / JSON API / CLI
                                     │
                                     ▼ (optional, "Answer with LLM")
-            top-5 pages as numbered sources ──▶ local LLM (LM Studio) ──▶ streamed answer with [n] citations
+            top-5 pages as numbered sources ──▶ LLM (LM Studio or Claude API) ──▶ streamed answer with [n] citations
 ```
 
 The UI works like a browser: every tab keeps its own search (query, filters, chosen LLM, results
@@ -42,18 +44,20 @@ The Search / Browse switch in the header belongs to the tab: Browse lists every 
 in the title filter; each view keeps its own text, and `?view=browse&filter=...` opens it directly.
 Cards are numbered by rank; with an LLM answer, the cards used as sources keep a filled badge with
 their source number. The bug icon turns on debug mode: under each card and fragment it shows how the
-fragment was scored (`vector #rank cosine · bm25 #rank score · rrf · retrieval #rank · rerank`).
+fragment was scored (`vector #rank cosine · bm25 #rank score · rrf · retrieval #rank · rerank`); under an
+LLM answer, the tokens it took (prompt, answer, reasoning if counted) and the time to the first token.
 The half-filled circle switches between the light and dark theme; until it is used, the page follows
 the system setting. The three icons sit in the title row, above the Find button.
 
-Search modes:
+Search modes. The UI always searches Hybrid + Rerank; the others are there for the API, the CLI
+(`--mode`, `--no-rerank`) and `scripts/eval.sh`:
 
 | Mode | Finds | Good at | Weak at |
 |---|---|---|---|
 | Keyword (`fts`) | chunks containing the query words (BM25) | error codes, module names, settings | synonyms, paraphrases |
 | Semantic (`vector`) | chunks with similar meaning (embeddings) | paraphrased questions | rare exact tokens |
-| Hybrid (default) | rank fusion of both lists | robust default | — |
-| + Rerank (UI default) | re-scores the top 10 chunks with a cross-encoder that reads query and chunk together; pages below the cut-off are collapsed and not sent to the LLM | precise ordering, meaningful 0..1 scores, drops junk | +~0.5 s per query |
+| Hybrid (default, the UI) | rank fusion of both lists | robust default | — |
+| + Rerank (always on in the UI) | re-scores the top 10 chunks with a cross-encoder that reads query and chunk together; pages below the cut-off are collapsed and not sent to the LLM | precise ordering, meaningful 0..1 scores, drops junk | +~0.5 s per query |
 
 ## Requirements
 
@@ -61,8 +65,10 @@ Search modes:
 - [uv](https://docs.astral.sh/uv/)
 - ~4 GB disk for models (downloaded on first use to the Hugging Face cache)
 - Confluence Cloud account with an [API token](https://id.atlassian.com/manage-profile/security/api-tokens)
-- For answers (optional): [LM Studio](https://lmstudio.ai) with a chat model loaded and the local server
-  started (Developer → Start Server, port 1234), or any other OpenAI-compatible server
+- For answers (optional), one of:
+  - [LM Studio](https://lmstudio.ai) with a chat model loaded and the local server started
+    (Developer → Start Server, port 1234), or any other OpenAI-compatible server;
+  - a Claude API key with credits (`RAG_LLM_PROVIDER=anthropic`, `ANTHROPIC_API_KEY` in `.env`)
 
 ## Quick start
 
@@ -117,10 +123,14 @@ Tuning (env, see `src/rag/config.py`):
 | `RAG_RERANK_CANDIDATES` | `10`, chunks re-scored by the cross-encoder |
 | `RAG_RERANK_MIN_SCORE` | `0.1`, relevance cut-off on rerank scores (pages below are flagged `low_relevance`) |
 | `RAG_CHUNK_MAX_TOKENS` / `RAG_CHUNK_MIN_TOKENS` | `500` / `80` |
+| `RAG_LLM_PROVIDER` | `openai`: LM Studio or another OpenAI-compatible server; `anthropic`: the Claude API |
 | `RAG_LLM_BASE_URL` | `http://127.0.0.1:1234/v1` (LM Studio; any OpenAI-compatible server works) |
-| `RAG_LLM_MODEL` | empty: use the model loaded in LM Studio |
-| `RAG_LLM_REASONING` | `none`: sent as `reasoning_effort`, turns off "thinking" for faster answers; empty: not sent |
-| `RAG_LLM_TEMPERATURE` / `RAG_LLM_MAX_TOKENS` | `0.2` / `1000` |
+| `ANTHROPIC_API_KEY` | the Claude API key, with `RAG_LLM_PROVIDER=anthropic` |
+| `RAG_CLAUDE_MODELS` | `claude-sonnet-5-5,claude-haiku-5-5`: the Claude models offered in the UI and accepted by `/api/answer` (empty: every model the key can use) |
+| `RAG_LLM_MODEL` | empty: the model loaded in LM Studio; with the Claude API, `claude-sonnet-5-5` |
+| `RAG_LLM_REASONING` | `none`: as little "thinking" as the model allows, for faster answers (LM Studio: sent as `reasoning_effort`; Claude Sonnet 5.5: `thinking: between_tools`, other Claude models: effort `low`); Claude also takes `low` / `medium` / `high` as the effort level; empty: the server default |
+| `RAG_LLM_TEMPERATURE` / `RAG_LLM_MAX_TOKENS` | `0.2` / `1000` (temperature is not sent to Claude: current models take only the default) |
+| `RAG_ANSWERS_PER_HOUR` | `200`: at most this many `/api/answer` requests per hour, then 429 (0: no limit). The API has no login and Claude answers are billed: also set a monthly spend limit in the Anthropic Console |
 | `RAG_LLM_CONTEXT_PAGES` / `RAG_LLM_CONTEXT_TOKENS` | `5` / `4000`: how much of the search result goes into the prompt |
 | `RAG_ALLOWED_HOSTS` | `127.0.0.1,localhost`: host names the server answers to (see below) |
 
@@ -167,18 +177,20 @@ missing (an interrupted rebuild), hybrid search falls back to vectors only.
 ```
 
 `GET /api/answer` takes the same parameters (but `rerank` is on by default, so that unrelated pages
-stay out of the prompt) plus optional `model` (an LLM id known to the LLM server; default: the model
-loaded in LM Studio) and streams NDJSON (one JSON event per line).
+stay out of the prompt) plus optional `model` (an LLM id known to the LLM server; default: `RAG_LLM_MODEL`,
+the model loaded in LM Studio, or `claude-sonnet-5-5`; an unknown one is a 400) and streams NDJSON (one JSON event per line).
 The search runs once: its results come first, then the answer.
 
 ```
 {"type": "results", "query": "...", "took_ms": 54, "results": [...]}   same as /api/search
 {"type": "sources", "sources": [{"n": 1, "page_id": "...", "title": "...", "url": "..."}]}
 {"type": "delta", "text": "The error means ... [1]"}                  repeated while streaming
-{"type": "done", "model": "...", "took_ms": 1771, "truncated": false}  or {"type": "error", "message": "..."}
+{"type": "done", "model": "...", "took_ms": 1771, "truncated": false, "first_token_ms": 640,
+ "usage": {"prompt_tokens": 1350, "completion_tokens": 210}}         or {"type": "error", "message": "..."}
 ```
 
-`truncated` is true when the answer hit `RAG_LLM_MAX_TOKENS`. A stream that the LLM server closes
+`truncated` is true when the answer hit `RAG_LLM_MAX_TOKENS`. `usage` (token counts as the LLM server reports
+them; `reasoning_tokens` when it counts thinking separately) and `first_token_ms` (time to the first answer text) are there when known. A stream that the LLM server closes
 early, or an answer with no text (a reasoning model that spent the budget thinking), is an `error`.
 
 `GET /api/llm` reports whether answer generation is available, the default model and all chat
@@ -250,6 +262,7 @@ Not in git: `raw-data/` (synced pages), `data/` (index), `_docs/` (internal note
 
 - [x] Confluence sync, chunking, local embeddings, hybrid search, web UI, evaluation
 - [x] Answer generation with citations from a local LLM (stage 2)
+- [x] The Claude API as an alternative LLM (stage 4)
 - [x] Relevance cut-off (rerank score threshold)
 - [ ] Answer quality evaluation
 - [ ] MCP server exposing search to coding agents

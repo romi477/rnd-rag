@@ -15,7 +15,9 @@ let closedIds = []; // recently closed tabs, so that another window's copy of th
 const controllers = {}; // tab id -> AbortController of its in-flight request
 let llmInfo = {available: false, model: null, models: [], error: "not checked yet", checked: false};
 let products = null; // product filter options, null until loaded
-const MODES = ["hybrid", "vector", "fts"];
+// The UI always searches hybrid + rerank (the rerank score is the relevance cut-off); the API and CLI still
+// take other modes, for experiments and eval.
+const SEARCH_PARAMS = {mode: "hybrid", rerank: "true"};
 const VIEWS = ["search", "browse"];
 const SEARCH_PLACEHOLDER = $("q").placeholder;
 let metaError = ""; // the product list could not be loaded
@@ -28,7 +30,7 @@ const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2
 
 // view: "search" or "browse" (the title filter of the article list is `filter`, kept apart from the query `q`).
 function newTab(init = {}) {
-  return {id: newId(), view: "search", q: "", filter: "", product: "", mode: "hybrid", rerank: true, llm: false, model: "",
+  return {id: newId(), view: "search", q: "", filter: "", product: "", llm: false, model: "",
           data: null, answer: null, status: "", error: "", busy: false, ...init};
 }
 
@@ -94,12 +96,12 @@ window.addEventListener("storage", (e) => {
 // Values from localStorage or a URL may be stale or hand-made.
 function sanitize(t) {
   const tab = {...newTab(), ...t};
-  if (!MODES.includes(tab.mode)) tab.mode = "hybrid";
+  delete tab.mode; delete tab.rerank; // settings of older versions: the UI no longer offers them
   if (!VIEWS.includes(tab.view)) tab.view = "search";
   for (const k of ["q", "filter", "product", "model", "error"]) if (typeof tab[k] !== "string") tab[k] = "";
   tab.q = tab.q.slice(0, 500);
   tab.filter = tab.filter.slice(0, 500);
-  for (const k of ["rerank", "llm"]) tab[k] = !!tab[k];
+  tab.llm = !!tab.llm;
   return tab;
 }
 
@@ -110,8 +112,6 @@ function readForm(tab) {
   if (tab.view === "browse") tab.filter = $("q").value.slice(0, 500);
   else tab.q = $("q").value.trim();
   tab.product = $("product").value;
-  tab.mode = $("mode").value;
-  tab.rerank = $("rerank").checked;
   tab.llm = $("llm").checked;
   if (llmInfo.checked) tab.model = $("model").value;
 }
@@ -138,8 +138,6 @@ function writeForm(tab) {
   if (llmInfo.checked && !hasOption("model", tab.model)) tab.model = "";
   $("q").value = browse ? tab.filter : tab.q;
   updatePlaceholder(tab);
-  $("mode").value = tab.mode;
-  $("rerank").checked = tab.rerank;
   $("llm").checked = tab.llm;
   $("model").value = hasOption("model", tab.model) ? tab.model : "";
   for (const view of VIEWS) $(`view-${view}`).setAttribute("aria-pressed", String(tab.view === view));
@@ -148,7 +146,7 @@ function writeForm(tab) {
 
 // Only the Find / Ask button runs a query; changing settings just marks the results as outdated.
 // The model matters only when the answer is written by the LLM.
-const SETTINGS = ["q", "product", "mode", "rerank", "llm", "model"];
+const SETTINGS = ["q", "product", "llm", "model"];
 const settingsOf = (tab) => Object.fromEntries(SETTINGS.map((k) => [k, tab[k]]));
 const isStale = (tab) => !!(tab.data && tab.ran && SETTINGS.some((k) => tab.ran[k] !== tab[k] && (k !== "model" || tab.llm)));
 
@@ -442,7 +440,21 @@ function renderAnswer(answer) {
     <div class="answer-body${streaming ? " streaming" : ""}">${answerBody(answer)}</div>
     ${error ? `<div class="answer-error">${escapeHtml(error)}</div>` : ""}
     ${footer ? `<div class="answer-foot">${escapeHtml(footer)}</div>` : ""}
+    ${usageHtml(answer)}
   </details>`;
+}
+
+// Debug mode: what the answer cost in tokens, as the LLM server reported it.
+function usageHtml({usage, firstTokenMs}) {
+  if (!debug || (!usage && firstTokenMs == null)) return "";
+  const parts = [];
+  if (usage) {
+    parts.push(`prompt <b>${usage.prompt_tokens}</b> tokens`);
+    if (usage.completion_tokens != null) parts.push(`answer <b>${usage.completion_tokens}</b>`);
+    if (usage.reasoning_tokens) parts.push(`of them reasoning <b>${usage.reasoning_tokens}</b>`);
+  }
+  if (firstTokenMs != null) parts.push(`first token <b>${(firstTokenMs / 1000).toFixed(1)}</b> s`);
+  return `<div class="debug answer-debug">${parts.join(" · ")}</div>`;
 }
 
 // A new token only re-renders the answer text, not the panel around it.
@@ -601,7 +613,7 @@ function updateUrl(tab) {
     return;
   }
   if (!tab.q) { history.replaceState(null, "", location.pathname); return; }
-  const params = new URLSearchParams({q: tab.q, mode: tab.mode, rerank: tab.rerank});
+  const params = new URLSearchParams({q: tab.q});
   if (tab.product) params.set("product", tab.product);
   if (tab.llm) params.set("llm", "true");
   if (tab.llm && tab.model) params.set("model", tab.model);
@@ -620,7 +632,7 @@ function addTab() {
   const current = activeTab();
   readForm(current);
   // a new tab inherits the settings, not the query
-  const tab = newTab({product: current.product, mode: current.mode, rerank: current.rerank, llm: current.llm, model: current.model});
+  const tab = newTab({product: current.product, llm: current.llm, model: current.model});
   tabs.push(tab);
   activeId = tab.id;
   renderView();
@@ -717,6 +729,8 @@ async function runAnswer(tab, params, signal) {
       a.streaming = false;
       a.model = ev.model || a.model;
       a.footer = ev.model ? `${(ev.took_ms / 1000).toFixed(1)} s · based on ${a.sources.length} source${a.sources.length === 1 ? "" : "s"}` : "";
+      a.usage = ev.usage || null;
+      a.firstTokenMs = ev.first_token_ms ?? null;
       if (ev.truncated) a.error = "The answer was cut off: it reached the max_tokens limit (RAG_LLM_MAX_TOKENS).";
     } else if (ev.type === "error") { a.streaming = false; a.error = "LLM error: " + ev.message; }
     if (isActive(tab)) { renderAnswer(a); if (ev.type === "sources") markSources(a.sources); }
@@ -746,7 +760,7 @@ async function run() {
   if (!tab.q) return;
   loadProducts(); // retried here if the first load failed
   const useLlm = tab.llm && llmInfo.available;
-  const params = new URLSearchParams({q: tab.q, mode: tab.mode, rerank: tab.rerank});
+  const params = new URLSearchParams({q: tab.q, ...SEARCH_PARAMS});
   if (tab.product) params.set("product", tab.product);
 
   controllers[tab.id]?.abort();
@@ -792,7 +806,12 @@ async function refreshLlmStatus() {
     llmInfo.models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${m.loaded === false ? " (not loaded)" : ""}</option>`).join("");
   $("model").value = [...$("model").options].some((o) => o.value === selected) ? selected : "";
   $("llm").disabled = $("model").disabled = !llmInfo.available;
-  $("llm-label").title = llmInfo.available ? LLM_HELP : `${LLM_HELP}\n\nUnavailable now: ${llmInfo.error}`;
+  // With the Claude API the question and the doc excerpts leave this machine: say so where the switch is.
+  const external = llmInfo.provider === "anthropic";
+  $("llm-provider").hidden = !external;
+  $("llm-label").title = LLM_HELP +
+    (external ? "\n\nThis server answers with the Claude API: the question and the doc excerpts are sent to Anthropic." : "") +
+    (llmInfo.available ? "" : `\n\nUnavailable now: ${llmInfo.error}`);
   if (activeTab()) updateSubmitLabel(activeTab());
 }
 
@@ -809,8 +828,8 @@ function openFromUrl() {
   if (!browse && !params.get("q")) return false;
   const wanted = browse
     ? sanitize({view: "browse", product: params.get("product") || "", filter: params.get("filter") || ""})
-    : sanitize({q: params.get("q").trim(), product: params.get("product") || "", mode: params.get("mode") || "hybrid",
-        rerank: flag(params.get("rerank"), true), llm: flag(params.get("llm"), false), model: params.get("model") || ""});
+    : sanitize({q: params.get("q").trim(), product: params.get("product") || "", llm: flag(params.get("llm"), false),
+        model: params.get("model") || ""}); // mode / rerank in older links are ignored
   const same = browse
     ? (t) => t.view === "browse" && t.product === wanted.product && t.filter === wanted.filter
     : (t) => t.view === "search" && SETTINGS.every((k) => t[k] === wanted[k] || (k === "model" && !t.llm));
@@ -869,7 +888,7 @@ $("theme").addEventListener("click", toggleTheme);
 }
 systemDark.addEventListener("change", () => { if (!savedTheme()) applyTheme(); });
 window.addEventListener("storage", (e) => { if (e.key === THEME_KEY) applyTheme(); });
-["product", "mode", "rerank", "llm", "model"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
+["product", "llm", "model"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
 $("tabs").addEventListener("click", (e) => {
   const close = e.target.closest("[data-close]");
   if (close) { e.stopPropagation(); closeTab(close.dataset.close); return; }

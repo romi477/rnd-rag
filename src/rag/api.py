@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -16,10 +18,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from rag import config
 from rag.answer import stream_answer
-from rag.llm import LLMClient, LLMError
+from rag.llm import LLMError, make_llm
 from rag.search import MODES, PageHit, Searcher
 
 state: dict = {}
+log = logging.getLogger(__name__)
 # Models on MPS are not safe to call from several threadpool workers at once.
 lock = threading.Lock()
 
@@ -36,7 +39,7 @@ def warm_up(searcher: Searcher) -> None:
 async def lifespan(_: FastAPI):
     searcher = Searcher()
     state["searcher"] = searcher
-    state["llm"] = LLMClient()
+    state["llm"] = make_llm()
     threading.Thread(target=warm_up, args=(searcher,), daemon=True).start()
     yield
     state.clear()
@@ -83,6 +86,25 @@ def search(
     return {"query": q, "took_ms": took_ms, "results": [asdict(h) for h in hits]}
 
 
+# Start times of the answers of the last hour, for RAG_ANSWERS_PER_HOUR.
+answer_times: deque[float] = deque()
+answer_times_lock = threading.Lock()
+
+
+def take_answer_slot() -> bool:
+    limit = config.ANSWERS_PER_HOUR
+    if limit <= 0:
+        return True
+    now = time.monotonic()
+    with answer_times_lock:
+        while answer_times and now - answer_times[0] > 3600:
+            answer_times.popleft()
+        if len(answer_times) >= limit:
+            return False
+        answer_times.append(now)
+        return True
+
+
 @app.get("/api/answer")
 def answer(
     q: str = Query(..., min_length=1, max_length=500),
@@ -90,14 +112,16 @@ def answer(
     mode: str = "hybrid",
     product: str | None = None,
     rerank: bool = True,  # the relevance cut-off keeps unrelated pages out of the prompt
-    model: str | None = Query(None, max_length=200, description="LLM id; default: the model loaded in LM Studio"),
+    model: str | None = Query(None, max_length=200, description="LLM id; default: RAG_LLM_MODEL, the model loaded in LM Studio, or claude-sonnet-5-5"),
 ) -> StreamingResponse:
     """Search + LLM answer as NDJSON events: results, sources, delta*, done | error.
 
     The search runs once: its results are the first event, the top pages become the sources.
     """
+    if not take_answer_slot():
+        raise HTTPException(429, f"Too many LLM answers: the limit is {config.ANSWERS_PER_HOUR} per hour (RAG_ANSWERS_PER_HOUR)")
     if model:
-        try:
+        try:  # the Claude client reuses its model list for a few minutes: no request per answer
             known = {m["id"] for m in state["llm"].list_models()}
         except LLMError:
             known = None  # server down: the answer stream reports it
@@ -109,16 +133,21 @@ def answer(
         first = {"type": "results", "query": q, "took_ms": took_ms, "results": [asdict(h) for h in hits]}
         yield json.dumps(first, ensure_ascii=False) + "\n"
         # The LLM runs outside the model lock.
-        for event in stream_answer(q, hits, state["llm"], model=model or None):
-            yield json.dumps(event, ensure_ascii=False) + "\n"
+        try:
+            for event in stream_answer(q, hits, state["llm"], model=model or None):
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+        except Exception as exc:  # the headers are sent: report it in the stream instead of cutting it off
+            log.exception("Answer failed")
+            yield json.dumps({"type": "error", "message": f"Internal error: {exc}"}) + "\n"
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @app.get("/api/llm")
 def llm_status() -> dict:
-    """Whether answer generation is available, the default model and all chat models."""
-    return state["llm"].status()
+    """Whether answer generation is available, the default model, all chat models and the provider
+    ("openai": LM Studio or another OpenAI-compatible server; "anthropic": the Claude API)."""
+    return state["llm"].status() | {"provider": config.LLM_PROVIDER}
 
 
 @app.get("/api/products")

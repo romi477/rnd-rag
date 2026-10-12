@@ -35,13 +35,21 @@ RERANK_MIN_SCORE = float(os.environ.get("RAG_RERANK_MIN_SCORE", 0.1))
 CHUNK_MAX_TOKENS = int(os.environ.get("RAG_CHUNK_MAX_TOKENS", 500))
 CHUNK_MIN_TOKENS = int(os.environ.get("RAG_CHUNK_MIN_TOKENS", 80))
 
-# Answer generation: any OpenAI-compatible server (LM Studio by default).
+# Answer generation: "openai" = any OpenAI-compatible server (LM Studio by default, local);
+# "anthropic" = the Claude API (key in ANTHROPIC_API_KEY; sends the prompt, with doc excerpts, to Anthropic).
+LLM_PROVIDER = os.environ.get("RAG_LLM_PROVIDER", "openai")
 LLM_BASE_URL = os.environ.get("RAG_LLM_BASE_URL", "http://127.0.0.1:1234/v1")
-LLM_MODEL = os.environ.get("RAG_LLM_MODEL", "")  # empty: the LLM currently loaded in LM Studio
-# Sent as `reasoning_effort`; "none" turns off thinking for reasoning models. Empty: not sent.
+LLM_MODEL = os.environ.get("RAG_LLM_MODEL", "")  # empty: the model loaded in LM Studio / claude-sonnet-5-5
+# Claude models offered in the UI and accepted by /api/answer (the API lists every model the key can use).
+CLAUDE_MODELS = [m.strip() for m in os.environ.get("RAG_CLAUDE_MODELS", "claude-sonnet-5-5,claude-haiku-5-5").split(",") if m.strip()]
+# "none" turns off thinking (OpenAI: `reasoning_effort`; Claude: the lowest thinking setting);
+# Claude also takes low / medium / high as the effort level. Empty: the server default.
 LLM_REASONING = os.environ.get("RAG_LLM_REASONING", "none")
 LLM_TEMPERATURE = float(os.environ.get("RAG_LLM_TEMPERATURE", 0.2))
 LLM_MAX_TOKENS = int(os.environ.get("RAG_LLM_MAX_TOKENS", 1000))
+# At most this many /api/answer requests per hour (0: no limit): the API has no login, and with the Claude
+# API every answer is billed. Set a monthly spend limit in the Anthropic Console as well.
+ANSWERS_PER_HOUR = int(os.environ.get("RAG_ANSWERS_PER_HOUR", 200))
 # How much of the search result goes into the prompt.
 LLM_CONTEXT_PAGES = int(os.environ.get("RAG_LLM_CONTEXT_PAGES", 5))
 LLM_CONTEXT_TOKENS = int(os.environ.get("RAG_LLM_CONTEXT_TOKENS", 4000))

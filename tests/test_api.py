@@ -49,6 +49,7 @@ class FakeLLM:
 def client(monkeypatch):
     # no lifespan: the real one would load the models
     monkeypatch.setattr(api, "state", {"searcher": FakeSearcher(), "llm": FakeLLM()})
+    monkeypatch.setattr(api, "answer_times", api.deque())
     return TestClient(api.app, base_url="http://127.0.0.1:8000")
 
 
@@ -101,3 +102,19 @@ def test_favicon_is_served_and_linked(client):
     icon = client.get("/favicon.svg")
     assert icon.status_code == 200 and icon.headers["content-type"].startswith("image/svg+xml")
     assert 'rel="icon" href="favicon.svg"' in client.get("/").text
+
+
+def test_answers_per_hour_limit(client, monkeypatch):
+    monkeypatch.setattr(api.config, "ANSWERS_PER_HOUR", 2)
+    codes = [client.get("/api/answer", params={"q": "x"}).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+
+
+def test_unexpected_llm_failure_ends_the_stream_with_an_error(client):
+    class Broken(FakeLLM):
+        def stream_chat(self, messages, model=None, info=None):
+            raise TypeError("boom")
+            yield
+
+    api.state["llm"] = Broken()
+    assert events(client.get("/api/answer", params={"q": "x"}))[-1] == {"type": "error", "message": "Internal error: boom"}

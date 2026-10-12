@@ -118,14 +118,14 @@ def ask(
     mode: str = typer.Option("hybrid", help="hybrid | vector | fts", callback=check_mode),
     product: str | None = typer.Option(None, help="Filter by product, e.g. 'Direct Print'"),
     rerank: bool = typer.Option(True, help="Rerank and drop low-relevance sources (--no-rerank: off)"),
-    llm_model: str = typer.Option(config.LLM_MODEL, help="LLM id (default: the one loaded in LM Studio)"),
+    llm_model: str = typer.Option(config.LLM_MODEL, help="LLM id (default: the one loaded in LM Studio, or claude-sonnet-5-5)"),
 ) -> None:
-    """Answer a question with the local LLM, grounded in the search results."""
+    """Answer a question with the LLM (RAG_LLM_PROVIDER), grounded in the search results."""
     from rag.answer import stream_answer
-    from rag.llm import LLMClient
+    from rag.llm import make_llm
 
     hits = open_searcher().search(query, k=config.LLM_CONTEXT_PAGES, mode=mode, product=product, rerank=rerank)
-    for event in stream_answer(query, hits, LLMClient(model=llm_model)):
+    for event in stream_answer(query, hits, make_llm(model=llm_model)):
         if event["type"] == "delta":
             typer.echo(event["text"], nl=False)
         elif event["type"] == "error":
@@ -161,7 +161,7 @@ def bench(
     from rag.bench import (
         default_report_path, load_questions, render_report, retrieval_line, run_bench, summary_rows,
     )
-    from rag.llm import LLMClient, LLMError
+    from rag.llm import LLMError, make_llm
 
     if not file.exists():
         fail(f"No questions file {file}: cp eval/bench.example.yaml eval/bench.yaml")
@@ -171,7 +171,7 @@ def bench(
         fail(f"Bad questions file: {exc}")
     if not questions:
         fail(f"No questions in {file}" + (f" for group '{group}'" if group else ""))
-    llm = LLMClient()
+    llm = make_llm()
     try:
         models = models or [llm.resolve_model()]
     except LLMError as exc:
@@ -180,8 +180,7 @@ def bench(
 
     settings = (
         f"Questions: {len(questions)} ({file.name}{f', group {group}' if group else ''}) · search: {mode}{' + rerank' if rerank else ''} · "
-        f"temperature {config.LLM_TEMPERATURE} · max_tokens {config.LLM_MAX_TOKENS} · "
-        f"reasoning {config.LLM_REASONING or 'default'}"
+        f"LLM: {llm.describe()} · max_tokens {config.LLM_MAX_TOKENS}"
     )
     out = out or default_report_path()
     if not git_ignored(out):

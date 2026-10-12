@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from rag import config
 from rag.chunking import approx_tokens
-from rag.llm import LLMClient, LLMError
+from rag.llm import LLM, LLMError
 
 if TYPE_CHECKING:  # rag.search pulls in torch: not needed to build a prompt
     from rag.search import PageHit
@@ -80,6 +80,18 @@ def build_context(
     return sources, "\n\n---\n\n".join(blocks)
 
 
+def token_usage(usage: dict | None) -> dict | None:
+    """Token counts as the LLM server reported them (UI debug mode): prompt, answer and, when the
+    server tells, the reasoning tokens included in the answer count."""
+    if not usage or usage.get("prompt_tokens") is None:
+        return None
+    counts = {"prompt_tokens": usage["prompt_tokens"], "completion_tokens": usage.get("completion_tokens")}
+    details = usage.get("completion_tokens_details") or {}
+    if details.get("reasoning_tokens"):
+        counts["reasoning_tokens"] = details["reasoning_tokens"]
+    return counts
+
+
 def build_messages(query: str, context: str) -> list[dict]:
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -88,11 +100,11 @@ def build_messages(query: str, context: str) -> list[dict]:
 
 
 def stream_answer(
-    query: str, pages: list[PageHit], llm: LLMClient, model: str | None = None
+    query: str, pages: list[PageHit], llm: LLM, model: str | None = None
 ) -> Iterator[dict]:
     """Events: sources -> delta* -> done, or an error event instead of done.
 
-    `model` overrides the client's default (the model loaded in LM Studio). `done.truncated` is
+    `model` overrides the client's default (the model loaded in LM Studio, or claude-sonnet-5-5). `done.truncated` is
     true when the answer was cut off by max_tokens.
     """
     sources, context = build_context(pages)
@@ -102,10 +114,12 @@ def stream_answer(
         yield {"type": "done", "model": None, "took_ms": 0}
         return
 
-    started, info, answered = time.perf_counter(), {}, False
+    started, info, answered, first_token_ms = time.perf_counter(), {}, False, None
     try:
         model = model or llm.resolve_model()
         for text in llm.stream_chat(build_messages(query, context), model=model, info=info):
+            if first_token_ms is None:  # the first answer text, as the bench measures it
+                first_token_ms = round((time.perf_counter() - started) * 1000)
             answered = answered or bool(text.strip())
             yield {"type": "delta", "text": text}
     except LLMError as exc:
@@ -114,9 +128,14 @@ def stream_answer(
     if not answered:
         yield {"type": "error", "message": EMPTY_ANSWER}
         return
-    yield {
+    done = {
         "type": "done",
         "model": model,
         "took_ms": round((time.perf_counter() - started) * 1000),
         "truncated": info.get("finish_reason") == "length",
     }
+    if first_token_ms is not None:
+        done["first_token_ms"] = first_token_ms
+    if usage := token_usage(info.get("usage")):
+        done["usage"] = usage
+    yield done

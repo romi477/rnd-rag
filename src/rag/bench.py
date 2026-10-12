@@ -18,7 +18,7 @@ import yaml
 
 from rag import config
 from rag.answer import Source, build_context, build_messages
-from rag.llm import LLMClient, LLMError
+from rag.llm import LLM, LLMError
 
 if TYPE_CHECKING:
     from rag.search import Mode, Searcher
@@ -83,7 +83,7 @@ def load_questions(path: Path, group: str | None = None) -> list[Question]:
     return [q for q in questions if group is None or q.group == group]
 
 
-def generate(llm: LLMClient, model: str, messages: list[dict], **kwargs) -> Run:
+def generate(llm: LLM, model: str, messages: list[dict], **kwargs) -> Run:
     run, info, parts = Run(model), {}, []
     started = time.perf_counter()
     try:
@@ -109,7 +109,7 @@ def generate(llm: LLMClient, model: str, messages: list[dict], **kwargs) -> Run:
 
 def run_bench(
     searcher: Searcher,
-    llm: LLMClient,
+    llm: LLM,
     questions: list[Question],
     models: list[str],
     mode: Mode = "hybrid",

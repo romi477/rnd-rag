@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -110,9 +111,13 @@ class FakeLLM:
         self.messages = messages
         if self.error:
             raise LLMError(self.error)
+        if info is not None and self.pieces:
+            info["first_delta_at"] = time.perf_counter()
         yield from self.pieces
         if info is not None:
             info["finish_reason"] = self.finish
+            info["usage"] = {"prompt_tokens": 1200, "completion_tokens": 80, "total_tokens": 1280,
+                             "completion_tokens_details": {"reasoning_tokens": 0}}
 
 
 def test_stream_answer_event_sequence():
@@ -121,6 +126,8 @@ def test_stream_answer_event_sequence():
     assert [e["type"] for e in events] == ["sources", "delta", "delta", "done"]
     assert events[0]["sources"][0]["title"] == "Install"
     assert events[-1]["model"] == "fake-model" and events[-1]["truncated"] is False
+    assert events[-1]["usage"] == {"prompt_tokens": 1200, "completion_tokens": 80}
+    assert events[-1]["first_token_ms"] >= 0
     assert "Question: How to install?" in llm.messages[1]["content"]
 
 
