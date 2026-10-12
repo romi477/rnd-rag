@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 
 from rag import config
-from rag.answer import answer_in, check_language, clean_text, language_rule, stream_llm
+from rag.answer import answer_in, answer_max_tokens, check_language, clean_text, language_rule, stream_llm
 from rag.chunking import approx_tokens
 from rag.code_graph import CodeGraph, MethodRef
 from rag.code_lookup import COLUMNS, FrameUnit, find_error_code, related_methods, resolve_frames, whole_unit
@@ -331,4 +331,6 @@ def stream_code_answer(
         yield {"type": "delta", "text": NO_CODE_SOURCES_BY_LANG[check_language(lang)]}
         yield {"type": "done", "model": None, "took_ms": 0}
         return
-    yield from stream_llm(build_code_messages(question, ev, context, lang), llm, model)
+    yield from stream_llm(
+        build_code_messages(question, ev, context, lang), llm, model, answer_max_tokens(config.CODE_LLM_MAX_TOKENS, lang)
+    )

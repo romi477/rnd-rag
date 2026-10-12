@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from rag import config
-from rag.answer import Source, build_context, build_messages
+from rag.answer import Source, answer_max_tokens, build_context, build_messages
 from rag.llm import LLM, LLMError
 
 if TYPE_CHECKING:
@@ -143,9 +143,10 @@ def run_bench(
             log(f"{i + 1:>2} no sources, skipped: {question.q}")
         else:
             messages = build_messages(question.q, context, lang)
+            limit = {} if lang == "en" else {"max_tokens": answer_max_tokens(config.LLM_MAX_TOKENS, lang)}
             # alternate the order so that no model always runs right after another one
             for model in models if i % 2 == 0 else models[::-1]:
-                run = item.runs[model] = generate(llm, model, messages)
+                run = item.runs[model] = generate(llm, model, messages, **limit)
                 log(f"{i + 1:>2} {model}: {describe(run)}")
         on_item(items)
     return items

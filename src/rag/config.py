@@ -47,6 +47,8 @@ CLAUDE_MODELS = [m.strip() for m in os.environ.get("RAG_CLAUDE_MODELS", "claude-
 LLM_REASONING = os.environ.get("RAG_LLM_REASONING", "none")
 LLM_TEMPERATURE = float(os.environ.get("RAG_LLM_TEMPERATURE", 0.2))
 LLM_MAX_TOKENS = int(os.environ.get("RAG_LLM_MAX_TOKENS", 1000))
+# Code answers (a failure's cause, the code involved, the next steps) are longer than a documentation answer.
+CODE_LLM_MAX_TOKENS = int(os.environ.get("RAG_CODE_LLM_MAX_TOKENS", 2000))
 # At most this many /api/answer requests per hour (0: no limit): the API has no login, and with the Claude
 # API every answer is billed. Set a monthly spend limit in the Anthropic Console as well.
 ANSWERS_PER_HOUR = int(os.environ.get("RAG_ANSWERS_PER_HOUR", 200))
@@ -74,3 +76,5 @@ ANSWER_LANGUAGES = {
     "ru": ("Russian", "Русский"),
 }
 ANSWER_LANGUAGE = os.environ.get("RAG_ANSWER_LANGUAGE", "en")
+# The same answer takes more tokens in other languages (Cyrillic and Polish most): the limit is multiplied by this.
+LANGUAGE_TOKEN_FACTOR = {"en": 1.0, "es": 1.3, "de": 1.4, "pl": 1.7, "ru": 2.0}

@@ -930,7 +930,7 @@ function applyAnswerEvent(tab, ev) {
     a.footer = ev.model ? `${(ev.took_ms / 1000).toFixed(1)} s · based on ${a.sources.length} source${a.sources.length === 1 ? "" : "s"}` : "";
     a.usage = ev.usage || null;
     a.firstTokenMs = ev.first_token_ms ?? null;
-    if (ev.truncated) a.error = "The answer was cut off: it reached the max_tokens limit (RAG_LLM_MAX_TOKENS).";
+    if (ev.truncated) a.error = `The answer was cut off: it reached the max_tokens limit (${tab.mode === "code" ? "RAG_CODE_LLM_MAX_TOKENS" : "RAG_LLM_MAX_TOKENS"}, more for languages other than English).`;
   } else if (ev.type === "error") { a.streaming = false; a.error = "LLM error: " + ev.message; }
   if (!isActive(tab)) return;
   renderAnswer(a);

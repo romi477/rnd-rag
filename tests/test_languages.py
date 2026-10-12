@@ -138,3 +138,43 @@ def test_code_answer_endpoint_takes_a_language(code_client):  # noqa: F811
 def test_cli_rejects_an_unknown_language():
     res = CliRunner().invoke(app, ["ask", "q", "--lang", "xx"])
     assert res.exit_code == 2 and "es" in res.output
+
+
+# --- answer length ------------------------------------------------------------------------------
+
+
+class KwargsLLM(FakeLLM):
+    """FakeLLM that keeps the keyword arguments of the chat call (max_tokens)."""
+
+    def stream_chat(self, messages, model=None, info=None, **kwargs):
+        self.kwargs = kwargs
+        yield from super().stream_chat(messages, model=model, info=info)
+
+
+def test_languages_other_than_english_get_a_longer_token_budget():
+    from rag.answer import answer_max_tokens
+
+    assert answer_max_tokens(1000, "en") == 1000
+    assert answer_max_tokens(1000, "ru") > answer_max_tokens(1000, "es") > 1000
+    assert all(answer_max_tokens(1000, lang) >= 1000 for lang in LANGS)
+    with pytest.raises(ValueError):
+        answer_max_tokens(1000, "xx")
+
+
+def test_docs_answer_in_english_keeps_the_servers_default_limit_other_languages_get_more():
+    llm = KwargsLLM(["ok [1]"])
+    list(stream_answer("q", [page("1", "A", ["t"])], llm))
+    assert llm.kwargs == {}  # nothing passed: the client's own default, as before
+    list(stream_answer("q", [page("1", "A", ["t"])], llm, lang="ru"))
+    assert llm.kwargs["max_tokens"] > config.LLM_MAX_TOKENS
+
+
+def test_code_answers_have_their_own_larger_limit(world, monkeypatch):  # noqa: F811
+    graph, store = world
+    ev = gather(store, graph, "", TRACEBACK, searcher=None)
+    monkeypatch.setattr(config, "CODE_LLM_MAX_TOKENS", 2000)
+    llm = KwargsLLM(["ok [1]"])
+    list(stream_code_answer("q", ev, llm))
+    assert llm.kwargs["max_tokens"] == 2000
+    list(stream_code_answer("q", ev, llm, lang="ru"))
+    assert llm.kwargs["max_tokens"] > 2000

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from rag import config
 from rag.bench import Run, as_markdown_block, describe, fmt, generate
+from rag.answer import answer_max_tokens
 from rag.code_answer import CodeSource, build_code_context, build_code_messages, gather
 from rag.code_graph import CodeGraph
 from rag.code_search import CodeSearcher
@@ -69,7 +70,7 @@ def run_trace_bench(
         else:
             messages = build_code_messages(case.question, ev, context, lang)
             for model in models if i % 2 == 0 else models[::-1]:  # no model always runs right after another one
-                run = item.runs[model] = generate(llm, model, messages)
+                run = item.runs[model] = generate(llm, model, messages, max_tokens=answer_max_tokens(config.CODE_LLM_MAX_TOKENS, lang))
                 log(f"{i + 1:>2} {case.id} {model}: {describe(run)}")
         on_item(items)
     return items

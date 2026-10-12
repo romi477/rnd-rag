@@ -40,7 +40,7 @@ class FakeLLM:
     def status(self):
         return {"available": True, "model": "m1", "models": self.list_models(), "error": None}
 
-    def stream_chat(self, messages, model=None, info=None):
+    def stream_chat(self, messages, model=None, info=None, **kwargs):
         self.messages = messages
         yield "Use the installer [1]."
         info["finish_reason"] = "stop"
@@ -113,7 +113,7 @@ def test_answers_per_hour_limit(client, monkeypatch):
 
 def test_unexpected_llm_failure_ends_the_stream_with_an_error(client):
     class Broken(FakeLLM):
-        def stream_chat(self, messages, model=None, info=None):
+        def stream_chat(self, messages, model=None, info=None, **kwargs):
             raise TypeError("boom")
             yield
 

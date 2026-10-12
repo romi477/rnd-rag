@@ -55,6 +55,11 @@ def language_rule(lang: str, english: str, other: str) -> str:
     return english if code == "en" else other.format(language=language_name(code))
 
 
+def answer_max_tokens(base: int, lang: str) -> int:
+    """The answer's token limit for a language: `base` times the language's factor (other languages need more tokens)."""
+    return round(base * config.LANGUAGE_TOKEN_FACTOR.get(check_language(lang), 1.0))
+
+
 def answer_in(lang: str) -> str:
     """The reminder after the question for a language other than English (the sources are English)."""
     return "" if check_language(lang) == "en" else f"\n\nAnswer in {language_name(lang)}."
@@ -147,7 +152,9 @@ def build_messages(query: str, context: str, lang: str = "en") -> list[dict]:
     ]
 
 
-def stream_llm(messages: list[dict], llm: LLM, model: str | None = None) -> Iterator[dict]:
+def stream_llm(
+    messages: list[dict], llm: LLM, model: str | None = None, max_tokens: int | None = None
+) -> Iterator[dict]:
     """Events after the sources: delta* -> done, or an error event instead of done.
 
     `model` overrides the client's default (the model loaded in LM Studio, or claude-sonnet-5-5). `done.truncated` is
@@ -156,7 +163,8 @@ def stream_llm(messages: list[dict], llm: LLM, model: str | None = None) -> Iter
     started, info, answered, first_token_ms = time.perf_counter(), {}, False, None
     try:
         model = model or llm.resolve_model()
-        for text in llm.stream_chat(messages, model=model, info=info):
+        limit = {} if max_tokens is None else {"max_tokens": max_tokens}  # none: the client's own default
+        for text in llm.stream_chat(messages, model=model, info=info, **limit):
             if first_token_ms is None:  # the first answer text, as the bench measures it
                 first_token_ms = round((time.perf_counter() - started) * 1000)
             answered = answered or bool(text.strip())
@@ -190,4 +198,6 @@ def stream_answer(
         yield {"type": "delta", "text": NO_SOURCES_BY_LANG[check_language(lang)]}
         yield {"type": "done", "model": None, "took_ms": 0}
         return
-    yield from stream_llm(build_messages(query, context, lang), llm, model)
+    # English keeps the client's default limit; another language gets more tokens for the same answer
+    max_tokens = None if check_language(lang) == "en" else answer_max_tokens(config.LLM_MAX_TOKENS, lang)
+    yield from stream_llm(build_messages(query, context, lang), llm, model, max_tokens)

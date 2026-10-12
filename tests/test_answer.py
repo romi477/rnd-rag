@@ -107,7 +107,7 @@ class FakeLLM:
     def resolve_model(self):
         return "fake-model"
 
-    def stream_chat(self, messages, model=None, info=None):
+    def stream_chat(self, messages, model=None, info=None, **kwargs):
         self.messages = messages
         if self.error:
             raise LLMError(self.error)
