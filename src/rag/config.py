@@ -53,3 +53,6 @@ ANSWERS_PER_HOUR = int(os.environ.get("RAG_ANSWERS_PER_HOUR", 200))
 # How much of the search result goes into the prompt.
 LLM_CONTEXT_PAGES = int(os.environ.get("RAG_LLM_CONTEXT_PAGES", 5))
 LLM_CONTEXT_TOKENS = int(os.environ.get("RAG_LLM_CONTEXT_TOKENS", 4000))
+
+# Code corpus (Odoo addons): units longer than this (approximate tokens) are split before embedding.
+CODE_MAX_TOKENS = int(os.environ.get("RAG_CODE_MAX_TOKENS", 500))

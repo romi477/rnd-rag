@@ -181,9 +181,9 @@ def test_cli_add_list_chain_adapters_rm(tmp_path, monkeypatch):
     build(tmp_path, "demo_shop", ["demo_core"], {"models/order.py": SHOP_ORDER, "api/client.py": SHOP_CLIENT})
     run = lambda *args: CliRunner().invoke(app, ["module", *args])  # noqa: E731
 
-    res = run("add", str(tmp_path / "demo_shop"))
+    res = run("add", str(tmp_path / "demo_shop"), "--no-index")
     assert res.exit_code == 0 and "not added yet: demo_core" in res.output
-    assert run("add", str(tmp_path / "demo_core"), "--origin", "core").exit_code == 0
+    assert run("add", str(tmp_path / "demo_core"), "--origin", "core", "--no-index").exit_code == 0
 
     listing = run("list").output
     assert "demo_core" in listing and "demo_shop" in listing and "19.0.1.0.0" in listing
@@ -198,3 +198,26 @@ def test_cli_add_list_chain_adapters_rm(tmp_path, monkeypatch):
     assert run("rm", "demo_shop").exit_code == 0
     assert "demo_shop" not in run("list").output
     assert run("rm", "demo_shop").exit_code == 1
+
+
+def test_cli_add_indexes_and_search_corpus_code_finds_it(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from rag import cli, config
+    from test_code_index import FakeEmbedder
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(cli, "make_embedder", lambda model=None: FakeEmbedder())
+    build(tmp_path, "demo_core", ["base"], {"models/order.py": CORE_ORDER})
+    run = lambda *args: CliRunner().invoke(cli.app, list(args))  # noqa: E731
+
+    res = run("module", "add", str(tmp_path / "demo_core"))
+    assert res.exit_code == 0, res.output
+    assert "indexed" in res.output
+
+    found = run("search", "action_sync", "--corpus", "code", "--mode", "fts")
+    assert found.exit_code == 0, found.output
+    assert "models/order.py:7" in found.output and "demo_core" in found.output
+
+    assert run("module", "rm", "demo_core", "--model", "fake").exit_code == 0
+    assert "No results" in run("search", "action_sync", "--corpus", "code", "--mode", "fts").output

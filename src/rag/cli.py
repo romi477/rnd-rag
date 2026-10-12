@@ -22,6 +22,15 @@ def check_mode(mode: str) -> str:
     return mode
 
 
+CORPORA = ("docs", "code")
+
+
+def check_corpus(corpus: str) -> str:
+    if corpus not in CORPORA:
+        raise typer.BadParameter(f"expected one of {', '.join(CORPORA)}")
+    return corpus
+
+
 def fail(message: str) -> None:
     typer.secho(message, fg="red", err=True)
     raise typer.Exit(1)
@@ -39,6 +48,12 @@ def git_ignored(path: Path) -> bool:
     except OSError:
         return True
     return res.returncode != 1  # 0: ignored; 128: not a repo / outside it
+
+
+def make_embedder(model: str = config.EMBED_MODEL):
+    from rag.embedding import Embedder
+
+    return Embedder(model)
 
 
 def open_searcher(model: str = config.EMBED_MODEL):
@@ -102,10 +117,15 @@ def module_add(
     tag_prefix: str = typer.Option("", help="Resolve the latest <prefix>-<series>.* tag instead of --ref"),
     series: str = typer.Option("19.0", help="Odoo series for --tag-prefix"),
     origin: str = typer.Option("connector", help="core | connector | customer"),
+    index: bool = typer.Option(True, "--index/--no-index", help="Embed the units for search (needs the embedding model)"),
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
 ) -> None:
-    """Add (or replace) an addon in the code graph. Embeddings are not built yet."""
+    """Add (or replace) an addon in the code graph and, unless --no-index, in the code search index."""
     from rag.code_graph import CodeGraph, ModuleInfo, graph_path
+    from rag.code_index import CodeIndexError, index_module
+    from rag.code_store import CodeStore
     from rag.sources.odoo_module import parse_module
+    from rag.store import store_path
 
     path, ref, source = open_module(path, ref, tag_prefix, series)
     units = parse_module(source, path.name, origin=origin)
@@ -113,9 +133,17 @@ def module_add(
         fail(f"{path.name}: no readable __manifest__.py at {ref or 'the working tree'}")
     graph = CodeGraph.load(graph_path())
     info = ModuleInfo.from_units(path.name, units, origin, ref)
+    if index:
+        embedder = make_embedder(model)
+        try:
+            n_rows = index_module(CodeStore(store_path(embedder.model_name)), embedder, info.name, units, log=typer.echo)
+        except CodeIndexError as exc:
+            fail(str(exc))
     graph.add_module(info, units)
     graph.save(graph_path())
     typer.echo(f"{info.name} {info.version} ({ref or 'working tree'}): {len(units)} units")
+    if index:
+        typer.echo(f"indexed {n_rows} rows for search")
     if missing := graph.missing_depends(info.name):
         typer.echo(f"depends not added yet: {', '.join(missing)} (Odoo core and other repositories are expected here)")
 
@@ -135,15 +163,21 @@ def module_list() -> None:
 
 
 @module_app.command("rm")
-def module_rm(name: str) -> None:
-    """Remove an addon from the code graph."""
+def module_rm(
+    name: str,
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+) -> None:
+    """Remove an addon from the code graph and the code search index."""
     from rag.code_graph import CodeGraph, graph_path
+    from rag.code_store import CodeStore
+    from rag.store import store_path
 
     graph = CodeGraph.load(graph_path())
     if name not in graph.modules:
         fail(f"{name} is not in the graph")
     graph.remove_module(name)
     graph.save(graph_path())
+    CodeStore(store_path(model)).delete_module(name)
     typer.echo(f"removed {name}")
 
 
@@ -224,6 +258,24 @@ def index(
     )
 
 
+def search_code(query: str, k: int, mode: str, model: str, modules: list[str] | None, show_text: bool) -> None:
+    from rag.code_search import CodeSearcher
+
+    try:
+        searcher = CodeSearcher(make_embedder(model))
+    except RuntimeError as exc:  # no code index yet
+        fail(str(exc))
+    hits = searcher.search(query, k=k, mode=mode, modules=modules or None)
+    for i, hit in enumerate(hits, 1):
+        owner = f"{hit.model}.{hit.name}" if hit.model and hit.kind == "method" else hit.model or hit.name
+        typer.secho(f"{i}. {hit.kind} {owner}  [{hit.score:.3f}]", bold=True)
+        typer.echo(f"   {hit.module} {hit.module_version} | {hit.path}:{hit.line_start}-{hit.line_end}")
+        if show_text:
+            typer.echo(textwrap.indent(textwrap.shorten(" ".join(hit.text.split()), 400), "     "))
+    if not hits:
+        typer.echo("No results")
+
+
 @app.command()
 def search(
     query: str,
@@ -233,8 +285,12 @@ def search(
     rerank: bool = typer.Option(False, help="Rerank candidates with a cross-encoder"),
     model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
     show_text: bool = typer.Option(False, "--text", help="Print matched chunk text"),
+    corpus: str = typer.Option("docs", help="docs (Confluence) | code (Odoo addons)", callback=check_corpus),
+    module: list[str] = typer.Option(None, help="Code corpus: only these modules (repeatable)"),
 ) -> None:
     """Search the index from the terminal."""
+    if corpus == "code":
+        return search_code(query, k, mode, model, module, show_text)
     searcher = open_searcher(model)
     hits = searcher.search(query, k=k, mode=mode, product=product, rerank=rerank)
     for i, page in enumerate(hits, 1):

@@ -46,8 +46,13 @@ class CodeUnit:
     extra: dict = field(default_factory=dict)
 
     @property
+    def unit_id(self) -> str:
+        """Identifies the unit; the parts of a split unit share it."""
+        return self.extra.get("unit_id") or f"{self.module}:{self.path}:{self.line_start}:{self.kind}"
+
+    @property
     def id(self) -> str:
-        return f"{self.module}:{self.path}:{self.line_start}:{self.kind}"
+        return self.unit_id + (f"#{self.extra['part']}" if "part" in self.extra else "")
 
 
 class FileSource(Protocol):
