@@ -119,6 +119,7 @@ def module_add(
     origin: str = typer.Option("connector", help="core | connector | customer"),
     index: bool = typer.Option(True, "--index/--no-index", help="Embed the units for search (needs the embedding model)"),
     model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+    reset_index: bool = typer.Option(False, help="Drop all modules from the search index first (after an index version change)"),
 ) -> None:
     """Add (or replace) an addon in the code graph and, unless --no-index, in the code search index."""
     from rag.code_graph import CodeGraph, ModuleInfo, graph_path
@@ -136,7 +137,7 @@ def module_add(
     if index:
         embedder = make_embedder(model)
         try:
-            n_rows = index_module(CodeStore(store_path(embedder.model_name)), embedder, info.name, units, log=typer.echo)
+            n_rows = index_module(CodeStore(store_path(embedder.model_name)), embedder, info.name, units, log=typer.echo, reset=reset_index)
         except CodeIndexError as exc:
             fail(str(exc))
     graph.add_module(info, units)

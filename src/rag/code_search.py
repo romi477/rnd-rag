@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 
 from rag import config
-from rag.code_store import CodeStore
+from rag.code_store import CodeStore, identifier_words
 from rag.embedding import Embedder
 from rag.search import FTS_SYNTAX, MODES, RRF_K
 from rag.store import sql_str, store_path
@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 COLUMNS = [
     "row_id", "unit_id", "kind", "module", "module_version", "origin", "model", "name", "path", "line_start",
-    "line_end", "text", "embed_text", "extra", "part", "parts",
+    "line_end", "text", "embed_text", "fts_text", "extra", "part", "parts",
 ]  # fmt: skip
 
 
@@ -92,6 +92,7 @@ class CodeSearcher:
             words = FTS_SYNTAX.sub(" ", query).strip()
             if not words:
                 return []
+            words = f"{words} {identifier_words(words)}".strip()  # ensureSettings also finds ensure_settings
             q = table.search(words, query_type="fts")
         else:
             q = table.search(self.embedder.embed_query(query), query_type="vector").distance_type("cosine")

@@ -7,6 +7,7 @@ whole module at a time, in one commit, so a running search never sees a module h
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import lancedb
@@ -17,8 +18,26 @@ from lancedb.index import FTS
 from rag.store import sql_str
 
 TABLE = "code_units"
-FTS_FIELD = "embed_text"
+FTS_FIELD = "fts_text"  # embed_text plus the words of camelCase names; the vectors come from embed_text alone
 META_FILE = "code_index_meta.json"
+
+
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def identifier_words(text: str) -> str:
+    """Lowercase words of the camelCase identifiers in `text`, in order, once each.
+
+    The BM25 tokenizer already splits snake_case and dotted names; it does not split camelCase, so
+    `ShopifyAPIClient` would never match "shopify api client". snake_case identifiers add nothing here.
+    """
+    words: dict[str, None] = {}
+    for ident in IDENTIFIER.findall(text):
+        parts = CAMEL_BOUNDARY.split(ident)
+        if len(parts) > 1:
+            words.update(dict.fromkeys(w.lower() for p in parts for w in p.split("_") if w))
+    return " ".join(words)
 
 
 def code_schema(dim: int) -> pa.Schema:
@@ -37,6 +56,7 @@ def code_schema(dim: int) -> pa.Schema:
             pa.field("line_end", pa.int32()),
             pa.field("text", pa.string()),
             pa.field("embed_text", pa.string()),
+            pa.field("fts_text", pa.string()),
             pa.field("extra", pa.string()),  # JSON: calls_super, adapter, depends...
             pa.field("part", pa.int32()),
             pa.field("parts", pa.int32()),

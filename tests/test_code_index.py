@@ -4,7 +4,7 @@ import pytest
 from rag.chunking import approx_tokens
 from rag.code_index import CodeIndexError, index_module, split_unit, unit_row
 from rag.code_search import CodeSearcher
-from rag.code_store import CodeStore
+from rag.code_store import CodeStore, identifier_words
 from rag.sources.odoo_module import CodeUnit
 
 VOCAB = ["order", "sync", "carrier", "client"]
@@ -175,3 +175,18 @@ def test_changed_index_version_asks_for_a_rebuild(indexed):
     indexed.write_meta(code_index_version=-1)
     with pytest.raises(CodeIndexError, match="re-add"):
         index_module(indexed, FakeEmbedder(), "demo_core", [unit()], log=lambda m: None)
+
+
+def test_identifier_words_splits_camel_case_only():
+    assert identifier_words("integrationApiExport _ensure_settings ShopifyAPIClient") == "integration api export shopify client"
+    assert identifier_words("plain words and snake_case") == ""
+
+
+def test_fts_matches_camel_case_names_by_their_words_and_the_reverse(store):
+    index_module(store, FakeEmbedder(), "demo_core", [
+        unit(name="exportInventoryNow", text="def exportInventoryNow(self):\n    return 1", start=1),
+        unit(name="export_stock_later", text="def export_stock_later(self):\n    return 2", start=9),
+    ], log=lambda m: None)
+    s = searcher(store)
+    assert s.search("export inventory now", mode="fts")[0].name == "exportInventoryNow"
+    assert s.search("exportStockLater", mode="fts")[0].name == "export_stock_later"

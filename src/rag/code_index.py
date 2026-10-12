@@ -8,11 +8,11 @@ from collections.abc import Callable
 
 from rag import config
 from rag.chunking import approx_tokens
-from rag.code_store import CodeStore
+from rag.code_store import CodeStore, identifier_words
 from rag.sources.odoo_module import CodeUnit
 
 # Bump when splitting or the row layout changes: modules added before must then be added again.
-CODE_INDEX_VERSION = 1
+CODE_INDEX_VERSION = 2
 PART_SUFFIX = " (part 99/99)"
 
 
@@ -68,7 +68,9 @@ def unit_row(unit: CodeUnit) -> dict:
         "row_id": unit.id, "unit_id": unit.unit_id, "kind": unit.kind, "module": unit.module,
         "module_version": unit.module_version, "origin": unit.origin, "model": unit.model, "name": unit.name,
         "path": unit.path, "line_start": unit.line_start, "line_end": unit.line_end, "text": unit.text,
-        "embed_text": unit.embed_text, "extra": json.dumps(unit.extra),
+        "embed_text": unit.embed_text,
+        "fts_text": unit.embed_text + ("\n" + words if (words := identifier_words(unit.embed_text)) else ""),
+        "extra": json.dumps(unit.extra),
         "part": unit.extra.get("part", 1), "parts": unit.extra.get("parts", 1),
     }
 
@@ -80,10 +82,14 @@ def index_module(
     units: list[CodeUnit],
     max_tokens: int = config.CODE_MAX_TOKENS,
     log: Callable[[str], None] = print,
+    reset: bool = False,
 ) -> int:
-    """Replace the rows of `module` with its units. Returns the number of rows written."""
+    """Replace the rows of `module` with its units. Returns the number of rows written.
+
+    `reset` first drops every module from the index (after a version or settings change).
+    """
     settings = {"code_index_version": CODE_INDEX_VERSION, "code_max_tokens": max_tokens}
-    if not store.exists():
+    if reset or not store.exists():
         store.reset(embedder.model_name, embedder.dim)
     meta = store.meta
     others = [m for m in store.modules() if m != module]
