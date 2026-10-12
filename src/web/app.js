@@ -271,8 +271,12 @@ function updateLlmControls() {
   $("model").disabled = $("lang").disabled = !(llmInfo.available && $("llm").checked);
 }
 
+// The switch says what will appear: an answer in Search / Browse, an explanation of the error in Code.
+const llmLabel = (tab) => (tab.mode === "code" ? "AI explanation" : "AI answer");
+
 function updateSubmitLabel(tab) {
   $("submit").textContent = submitLabel(tab);
+  $("llm-text").textContent = llmLabel(tab);
 }
 
 function statusText(tab) {
@@ -350,7 +354,7 @@ const isOpen = (tab, pageId, i) => tab.open?.[pageId] ?? i === 0;
 // What the Search view shows before the first search of a tab.
 const HINT = `<div class="hint-empty">
   <div>Search the product documentation.</div>
-  <div class="hint">Turn on "Answer with LLM" to get an answer with links to the sources.</div>
+  <div class="hint">Turn on "AI answer" to get an answer with links to the sources.</div>
   <div class="hint">Not sure what to look for? <a href="#" data-browse>Browse all articles</a></div>
 </div>`;
 
@@ -674,7 +678,7 @@ const ROLE_LABEL = {frame: "failing frame", caller: "caller", override: "also de
 const HINT_CODE = `<div class="hint-empty">
   <div>Explain a failed job from its traceback.</div>
   <div class="hint">Describe the problem above, or press <b>Add traceback</b> and paste the traceback of a <code>queue.job</code>: either is enough, both is best. The frames of the traceback are looked up in the code of the indexed modules.</div>
-  <div class="hint">Turn on "Answer with LLM" to get an explanation with references to the code.</div>
+  <div class="hint">Turn on "AI explanation" to get an explanation with references to the code.</div>
 </div>`;
 
 const looksLikeTraceback = (text) => /Traceback \(most recent call last\)|File "[^"]+", line \d+/.test(text);

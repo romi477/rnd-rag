@@ -29,7 +29,7 @@ Confluence ──sync──▶ raw-data/          markdown + metadata per page (
    query ──▶ vector top-40 + BM25 top-40 ──▶ weighted RRF fusion ──▶ [optional cross-encoder rerank]
                        ──▶ group chunks by page ──▶ web UI / JSON API / CLI
                                     │
-                                    ▼ (optional, "Answer with LLM")
+                                    ▼ (optional, "AI answer")
             top-5 pages as numbered sources ──▶ LLM (LM Studio or Claude API) ──▶ streamed answer with [n] citations
 ```
 
@@ -43,12 +43,12 @@ model is told to answer in that language and to keep menu paths, settings, error
 The API takes `lang` (`/api/answer`) or `language` (`/api/code/answer`); `/api/languages` lists them. The documentation is
 English: questions in the other languages are searched by the multilingual embedder and reranker, not translated.
 
-Only the button runs a query: it reads "Find", or "Ask" when "Answer with LLM" is on, and "Stop"
+Only the button runs a query: it reads "Find", or "Ask" when "AI answer" is on, and "Stop"
 next to it cancels a running request (what has streamed so far stays). Changing settings afterwards
 marks the results as outdated until the next run. The eraser icon clears the tab.
 Keyboard: `/` focuses the question box (not while typing in a field), `F1` / `F2` / `F3` jump to Search / Browse / Code and
 `Ctrl+Alt+Left` / `Ctrl+Alt+Right` step through them. The model and the answer language are read-only while
-"Answer with LLM" is off.
+"AI answer" is off.
 The Search / Browse switch in the header belongs to the tab: Browse lists every indexed article
 (`/api/pages`) grouped by product and section, narrowed by the product filter and by the words typed
 in the title filter; each view keeps its own text, and `?view=browse&filter=...` opens it directly.
@@ -245,7 +245,7 @@ scripts/bench-traces.sh MODEL [MODEL...] --group real  # same evidence and promp
 ```
 
 The web UI has one three-position switch per tab (Search, Browse, Code): Code takes a described problem and/or a traceback (optional: "Add traceback" next to the question opens a small window for it, which collapses to its title bar; a traceback pasted into the question box moves there), shows the frames mapped to code and, with
-"Answer with LLM", an explanation citing the code as `[n]`. Source code is not sent to the Claude API unless
+"AI explanation", an explanation citing the code as `[n]`. Source code is not sent to the Claude API unless
 `RAG_CODE_EXTERNAL_LLM=1`. `eval/traces.yaml` is git-ignored; start from `eval/traces.example.yaml`.
 
 A question that names a function (quoted, snake_case, camelCase or `model.method`) gets its definition by exact name, so "how does `_import_one_product` work?" quotes the method itself and the answer walks through it step by step.

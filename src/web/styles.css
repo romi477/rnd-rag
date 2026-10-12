@@ -56,7 +56,7 @@ select {
   border: 1px solid var(--border); border-radius: 6px;
 }
 label { display: inline-flex; gap: 6px; align-items: center; }
-select:disabled { opacity: .6; cursor: not-allowed; }  /* the model and the language, while "Answer with LLM" is off */
+select:disabled { opacity: .6; cursor: not-allowed; }  /* the model and the language, while "AI answer" is off */
 #status { margin: 20px 0 8px; color: var(--muted); font-size: 13px; min-height: 20px; }
 .result {
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
