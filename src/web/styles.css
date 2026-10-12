@@ -256,6 +256,7 @@ details.result:not([open]) { padding-top: 10px; padding-bottom: 10px; }
 
 /* Code mode (app.js sets data-mode on <body>): the traceback box and its filters replace the documentation ones */
 body:not([data-mode="code"]) .code-only, body[data-mode="code"] .docs-only { display: none; }
+label[hidden] { display: none; }
 #trace {
   grid-column: 1 / -1; width: 100%; min-height: 96px; padding: 8px 12px; resize: vertical; outline: none;
   font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text);

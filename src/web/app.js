@@ -29,6 +29,10 @@ const DOCS_SUBTITLE = $("subtitle").textContent;
 const CODE_PLACEHOLDER = "Optional: a question about the failure…";
 const CODE_DEFAULTS = {trace: "", module: "", version: "", docs: false};
 const CODE_FIELDS = Object.keys(CODE_DEFAULTS);
+// "Add documentation" (Confluence pages next to the code sources) is hidden: the articles are written for users and
+// rarely match an error message (see the stage notes). The API still takes `docs`; set this to true to bring it back.
+const SHOW_CODE_DOCS = false;
+$("code-docs").closest("label").hidden = !SHOW_CODE_DOCS;
 const SETTING_DEFAULTS = {mode: "docs", ...CODE_DEFAULTS, lang: ""}; // what a saved `ran` snapshot may lack
 // The languages an answer can be written in (GET /api/languages); "" in a tab means the server's default.
 let languages = [{code: "en", name: "English", native: "English"}];
@@ -123,7 +127,7 @@ function sanitize(t) {
   tab.trace = tab.trace.slice(0, TRACE_MAX);
   tab.version = tab.version.slice(0, 50);
   tab.llm = !!tab.llm;
-  tab.docs = !!tab.docs;
+  tab.docs = SHOW_CODE_DOCS && !!tab.docs; // a saved tab cannot keep a hidden option on
   tab.lang = tab.lang.slice(0, 10);
   if (tab.ran) tab.ran = {...SETTING_DEFAULTS, ...tab.ran}; // else the new settings would look "changed"
   return tab;
@@ -140,7 +144,7 @@ function readForm(tab) {
     tab.trace = $("trace").value.slice(0, TRACE_MAX);
     tab.module = $("code-module").value;
     tab.version = $("client-version").value.trim().slice(0, 50);
-    tab.docs = $("code-docs").checked;
+    tab.docs = SHOW_CODE_DOCS && $("code-docs").checked;
   }
   tab.llm = $("llm").checked;
   if (llmInfo.checked) tab.model = $("model").value;
