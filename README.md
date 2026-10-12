@@ -7,6 +7,8 @@ as the LLM, each answer sends the question and the top doc excerpts to Anthropic
 
 **Status:** stage 1 (retrieval + search UI) and stage 2 (LLM answers with citations) are done; stage 4 adds
 the Claude API as an alternative LLM (`RAG_LLM_PROVIDER=anthropic`).
+On the branch `feat/code-search` (experimental, not merged) the same tool also searches the code of Odoo addons
+and explains failed background jobs from their traceback: see [Code corpus](#code-corpus-experimental-branch-featcode-search).
 
 ## How it works
 
@@ -313,6 +315,7 @@ Not in git: `raw-data/` (synced pages), `data/` (index), `_docs/` (internal note
 - [x] Confluence sync, chunking, local embeddings, hybrid search, web UI, evaluation
 - [x] Answer generation with citations from a local LLM (stage 2)
 - [x] The Claude API as an alternative LLM (stage 4)
+- [x] Code search and traceback analysis for Odoo addons (stage 3, experimental, branch `feat/code-search`)
 - [x] Relevance cut-off (rerank score threshold)
 - [ ] Answer quality evaluation
 - [ ] MCP server exposing search to coding agents

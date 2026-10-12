@@ -9,6 +9,9 @@ Local RAG over the internal Confluence space `pd` ("R&D: Products Documentation"
 - Stage 2 (done): answers with [n] citations from a local LLM (LM Studio, OpenAI-compatible API)
   on top of `Searcher.search()`; UI toggle "Answer with LLM".
 - Stage 4: the Claude API (`claude-sonnet-5-5`) as an alternative LLM, `RAG_LLM_PROVIDER=anthropic`.
+- Stage 3 (experimental, branch `feat/code-search`, not merged): code corpus of Odoo addons from a git ref, failed-job traceback
+  analysis, `Code` mode in the UI, answer languages (see the Code corpus rows below). Notes: `_docs/s4-plan.md`, `_docs/s4-results.md`
+  (the `_docs` file prefixes of stages 3 and 4 are swapped: `s4-*` = code, `s3-*` = Claude API).
 
 ## Hard rules
 
