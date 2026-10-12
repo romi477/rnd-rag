@@ -16,17 +16,11 @@
   <div class="chrome" id="chrome">
   <header class="top">
     <h1>Docs Search <span id="subtitle">· R&amp;D Products Documentation</span></h1>
-    <div class="switches">
-      <!-- The mode belongs to the tab: Docs searches the documentation, Code explains a failed job from the code of the modules. -->
-      <div class="view-switch" id="mode-switch" role="group" aria-label="Corpus">
-        <button type="button" id="mode-docs" aria-pressed="true" title="Search the product documentation">Docs</button>
-        <button type="button" id="mode-code" aria-pressed="false" title="Explain a failed job from its traceback and the code of the modules (experimental)">Code</button>
-      </div>
-      <!-- The view belongs to the tab: Search runs queries, Browse lists every article. -->
-      <div class="view-switch docs-only" role="group" aria-label="View">
-        <button type="button" id="view-search" aria-pressed="true">Search</button>
-        <button type="button" id="view-browse" aria-pressed="false" title="All articles of the documentation">Browse</button>
-      </div>
+    <!-- One switch, three positions, per tab: Search and Browse work on the documentation, Code explains a failed job from its traceback. -->
+    <div class="view-switch" role="group" aria-label="View">
+      <button type="button" id="pos-search" aria-pressed="true" title="Search the product documentation">Search</button>
+      <button type="button" id="pos-browse" aria-pressed="false" title="All articles of the documentation">Browse</button>
+      <button type="button" id="pos-code" aria-pressed="false" title="Explain a failed job from its traceback and the code of the modules (experimental)">Code</button>
     </div>
     <div class="tools">
       <button type="button" id="clear" class="icon-btn" title="Clear search" aria-label="Clear search">

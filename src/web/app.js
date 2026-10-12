@@ -20,6 +20,9 @@ let products = null; // product filter options, null until loaded
 const SEARCH_PARAMS = {mode: "hybrid", rerank: "true"};
 const VIEWS = ["search", "browse"];
 const MODES = ["docs", "code"]; // per tab: the documentation, or the code of the modules (explains a failed job's traceback)
+// The one switch in the header has three positions: Search and Browse are the views of the documentation, Code is a mode.
+const POSITIONS = ["search", "browse", "code"];
+const positionOf = (tab) => (tab.mode === "code" ? "code" : tab.view);
 const TRACE_MAX = 30000; // = the API limit
 const SEARCH_PLACEHOLDER = $("q").placeholder;
 const DOCS_SUBTITLE = $("subtitle").textContent;
@@ -185,7 +188,6 @@ function writeForm(tab) {
   $("trace").value = tab.trace;
   $("client-version").value = tab.version;
   $("code-docs").checked = tab.docs;
-  for (const mode of MODES) $(`mode-${mode}`).setAttribute("aria-pressed", String(tab.mode === mode));
   document.body.dataset.mode = tab.mode;
   $("subtitle").textContent = tab.mode === "code" ? "· Failed job analysis (experimental)" : DOCS_SUBTITLE;
   // a model that no longer exists falls back to the default model
@@ -195,7 +197,7 @@ function writeForm(tab) {
   $("llm").checked = tab.llm;
   $("model").value = hasOption("model", tab.model) ? tab.model : "";
   $("lang").value = effectiveLang(tab);
-  for (const view of VIEWS) $(`view-${view}`).setAttribute("aria-pressed", String(tab.view === view));
+  for (const pos of POSITIONS) $(`pos-${pos}`).setAttribute("aria-pressed", String(positionOf(tab) === pos));
   updateSubmitLabel(tab);
 }
 
@@ -774,6 +776,15 @@ function setMode(mode) {
   $(mode === "code" ? "trace" : "q").focus();
 }
 
+// The three-position switch: Code is a mode of its own, Search and Browse are the views of the documentation mode.
+function setPosition(pos) {
+  const tab = activeTab();
+  if (!tab || positionOf(tab) === pos) return;
+  if (pos === "code") { setMode("code"); return; }
+  if (tab.mode === "code") setMode("docs"); // back to the documentation, in its Search view
+  setView(pos);
+}
+
 // Switch the active tab between searching and browsing; each view keeps the text typed in it.
 function setView(view) {
   const tab = activeTab();
@@ -1101,8 +1112,7 @@ async function init() {
 $("form").addEventListener("submit", (e) => { e.preventDefault(); run(); });
 $("stop").addEventListener("click", stopRun);
 $("clear").addEventListener("click", clearResults);
-for (const view of VIEWS) $(`view-${view}`).addEventListener("click", () => setView(view));
-for (const mode of MODES) $(`mode-${mode}`).addEventListener("click", () => setMode(mode));
+for (const pos of POSITIONS) $(`pos-${pos}`).addEventListener("click", () => setPosition(pos));
 $("trace").addEventListener("input", () => {  // saved without the settings round trip: a traceback is long
   const tab = activeTab();
   if (!tab) return;

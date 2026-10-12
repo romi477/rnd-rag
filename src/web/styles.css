@@ -240,7 +240,7 @@ details.result:not([open]) { padding-top: 10px; padding-bottom: 10px; }
   .actions > button:hover, .icon-btn:hover, .actions > button:active, .icon-btn:active { transform: none; }
 }
 
-/* Search / Browse: a framed segmented control in the middle of the header */
+/* Search / Browse / Code: a framed segmented control in the middle of the header */
 .view-switch {
   display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
 }
@@ -251,11 +251,8 @@ details.result:not([open]) { padding-top: 10px; padding-bottom: 10px; }
 @media (max-width: 760px) {
   h1 { white-space: normal; }
   header.top { grid-template-columns: 1fr auto; }
+  .view-switch { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
 }
-
-/* Docs / Code and Search / Browse: the two switches sit side by side in the middle of the header */
-.switches { display: flex; gap: 10px; align-items: center; justify-self: center; }
-@media (max-width: 760px) { .switches { grid-column: 1 / -1; grid-row: 2; justify-self: start; } }
 
 /* Code mode (app.js sets data-mode on <body>): the traceback box and its filters replace the documentation ones */
 body:not([data-mode="code"]) .code-only, body[data-mode="code"] .docs-only { display: none; }

@@ -226,7 +226,7 @@ scripts/eval-traces.sh --misses                      # does the evidence contain
 scripts/bench-traces.sh MODEL [MODEL...] --group real  # same evidence and prompt to several local LLMs, report in data/bench/
 ```
 
-The web UI has a Docs / Code switch per tab: Code takes a pasted traceback, shows the frames mapped to code and, with
+The web UI has one three-position switch per tab (Search, Browse, Code): Code takes a pasted traceback, shows the frames mapped to code and, with
 "Answer with LLM", an explanation citing the code as `[n]`. Source code is not sent to the Claude API unless
 `RAG_CODE_EXTERNAL_LLM=1`. `eval/traces.yaml` is git-ignored; start from `eval/traces.example.yaml`.
 
