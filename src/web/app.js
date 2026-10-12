@@ -162,7 +162,7 @@ const effectiveLang = (tab) => (languages.some((l) => l.code === tab.lang) ? tab
 const langParam = (tab) => (languagesLoaded ? effectiveLang(tab) : "");
 
 function fillLanguages(tab) {
-  $("lang").innerHTML = languages.map((l) => `<option value="${escapeHtml(l.code)}" title="${escapeHtml(l.name)}">${escapeHtml(l.native)}</option>`).join("");
+  $("lang").innerHTML = languages.map((l) => `<option value="${escapeHtml(l.code)}" title="${escapeHtml(l.native)}">${escapeHtml(l.code.toUpperCase())}</option>`).join("");
   $("lang").value = tab ? effectiveLang(tab) : defaultLang;
 }
 
@@ -1175,9 +1175,8 @@ async function refreshLlmStatus() {
     llmInfo.models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${m.loaded === false ? " (not loaded)" : ""}</option>`).join("");
   $("model").value = [...$("model").options].some((o) => o.value === selected) ? selected : "";
   updateLlmControls();
-  // With the Claude API the question and the doc excerpts leave this machine: say so where the switch is.
+  // With the Claude API the question and the doc excerpts leave this machine: say so in the switch's tooltip.
   const external = llmInfo.provider === "anthropic";
-  $("llm-provider").hidden = !external;
   $("llm-label").title = LLM_HELP +
     (external ? "\n\nThis server answers with the Claude API: the question and the doc excerpts are sent to Anthropic." : "") +
     (llmInfo.available ? "" : `\n\nUnavailable now: ${llmInfo.error}`);

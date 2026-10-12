@@ -79,7 +79,7 @@
       <label class="code-only" title="Also quote the Confluence pages that match the error message."><input type="checkbox" id="code-docs"> Add documentation</label>
       <span id="browse-count" class="browse-only"></span>
       <span class="llm-group search-only">
-        <label id="llm-label" title="Also write an answer from the top pages with the LLM (local LM Studio or the Claude API, set on the server), citing them as [n]. Check the answer against the cited sources."><input type="checkbox" id="llm"> Answer with LLM<span id="llm-provider" class="llm-provider" hidden>via Claude API</span></label>
+        <label id="llm-label" title="Also write an answer from the top pages with the LLM (local LM Studio or the Claude API, set on the server), citing them as [n]. Check the answer against the cited sources."><input type="checkbox" id="llm"> Answer with LLM</label>
         <select id="model" aria-label="LLM model" title="The LLM that writes the answer (turn on Answer with LLM to change it). Default: the model set on the server (in LM Studio: the loaded one). Models marked (not loaded) are loaded by LM Studio on first use, which takes a while."><option value="">Default</option></select>
         <select id="lang" aria-label="Answer language" title="The language of the LLM answer (turn on Answer with LLM to change it). The sources stay in English; menu paths, settings and code are quoted as they are."><option value="en">English</option></select>
         <button type="button" id="refresh-models" class="icon-btn" title="Refresh the model list (and, with LM Studio, which models are loaded)" aria-label="Refresh the model list">
