@@ -17,6 +17,8 @@ BENCH_FILE = Path(os.environ.get("RAG_BENCH_FILE", ROOT / "eval" / "bench.yaml")
 WEB_DIR = Path(os.environ.get("RAG_WEB_DIR", ROOT / "src" / "web"))  # static UI served by api.py
 # Host names the API answers to (Host header); add the machine's name when binding beyond localhost.
 ALLOWED_HOSTS = os.environ.get("RAG_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+# Access token for the UI and the API (HTTP Basic: the token is the password, the user name is ignored); empty: no login.
+API_TOKEN = os.environ.get("RAG_API_TOKEN", "").strip()
 
 SPACE_KEY = os.environ.get("CONFLUENCE_SPACE_KEY", "pd")
 

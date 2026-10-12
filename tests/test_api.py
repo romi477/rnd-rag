@@ -156,3 +156,54 @@ def test_page_with_a_broken_synced_copy_is_a_500_with_a_hint(client, tmp_path, m
     (tmp_path / "raw" / "demo" / "pages" / "123.json").write_text("{not json")
     res = client.get("/api/pages/123")
     assert res.status_code == 500 and "sync" in res.json()["detail"]
+
+
+def basic(user: str, token: str) -> dict:
+    import base64
+
+    return {"Authorization": "Basic " + base64.b64encode(f"{user}:{token}".encode()).decode()}
+
+
+@pytest.fixture
+def locked(client, monkeypatch):
+    monkeypatch.setattr(config, "API_TOKEN", "s3cret")
+    return client
+
+
+def test_no_token_configured_means_no_login(client):
+    assert client.get("/api/products").status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/api/products", "/api/search?q=x", "/api/answer?q=x", "/api/code/modules", "/"])
+def test_token_guards_api_and_ui(locked, path):
+    res = locked.get(path)
+    assert res.status_code == 401
+    assert res.headers["WWW-Authenticate"].startswith("Basic")  # the browser asks once, then sends it with every request
+    assert "Printing" not in res.text
+
+
+def test_token_is_the_password_and_the_user_name_is_ignored(locked):
+    assert locked.get("/api/products", headers=basic("", "s3cret")).json() == ["Printing"]
+    assert locked.get("/api/products", headers=basic("anyone", "s3cret")).status_code == 200
+    assert locked.get("/").status_code == 401  # the page itself is behind it too
+    assert locked.get("/", headers=basic("", "s3cret")).status_code == 200
+
+
+def test_decoded_header_without_a_colon_is_the_token(locked):
+    import base64
+
+    header = {"Authorization": "Basic " + base64.b64encode(b"s3cret").decode()}
+    assert locked.get("/api/products", headers=header).status_code == 200
+
+
+@pytest.mark.parametrize("headers", [
+    basic("", "wrong"), basic("s3cret", ""), basic("", "s3cret "), {"Authorization": "Bearer s3cret"},
+    {"Authorization": "Basic !!!not-base64"}, {"Authorization": "Basic"}, {"Authorization": ""},
+])
+def test_wrong_credentials_are_401(locked, headers):
+    assert locked.get("/api/products", headers=headers).status_code == 401
+
+
+def test_unauthorised_request_does_not_reach_the_handlers(locked):
+    locked.get("/api/answer", params={"q": "install"})
+    assert api.state["searcher"].calls == []

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hmac
 import json
 import logging
 import threading
@@ -12,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException, Path, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -58,8 +60,38 @@ async def lifespan(_: FastAPI):
 
 # No /docs or /redoc: they load scripts from a CDN, and everything here stays local.
 app = FastAPI(title="rnd-rag", lifespan=lifespan, docs_url=None, redoc_url=None)
+
+
+def token_given(header: str) -> str | None:
+    """The token in an `Authorization: Basic` header: the password of `user:password`, or the whole value
+    when it has no colon. None for any other kind of header or one that does not decode."""
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "basic":
+        return None
+    try:
+        decoded = base64.b64decode(value.strip(), validate=True).decode()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return decoded.partition(":")[2] if ":" in decoded else decoded
+
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    """With RAG_API_TOKEN set, the UI and every endpoint need it (HTTP Basic: the browser asks once and then
+    sends it with each request, so the page's own fetch calls need no code). Read per request, not at import."""
+    expected = config.API_TOKEN
+    if expected:
+        given = token_given(request.headers.get("authorization", ""))
+        if given is None or not hmac.compare_digest(given.encode(), expected.encode()):
+            return Response(
+                "Authentication required", status_code=401, headers={"WWW-Authenticate": 'Basic realm="rnd-rag", charset="UTF-8"'}
+            )
+    return await call_next(request)
+
+
 # Only answer to requests addressed to this machine by name: a page on another site that rebinds
 # its DNS name to 127.0.0.1 would otherwise read the docs. Bind to another interface? Add its name.
+# Added after the token check, so it runs first.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.ALLOWED_HOSTS)
 
 

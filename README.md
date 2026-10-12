@@ -147,14 +147,15 @@ Tuning (env, see `src/rag/config.py`):
 | `RAG_LLM_MODEL` | empty: the model loaded in LM Studio; with the Claude API, `claude-sonnet-5-5` |
 | `RAG_LLM_REASONING` | `none`: as little "thinking" as the model allows, for faster answers (LM Studio: sent as `reasoning_effort`; Claude Sonnet 5.5: `thinking: between_tools`, other Claude models: effort `low`); Claude also takes `low` / `medium` / `high` as the effort level; empty: the server default |
 | `RAG_LLM_TEMPERATURE` / `RAG_LLM_MAX_TOKENS` | `0.2` / `1000` (temperature is not sent to Claude: current models take only the default) |
-| `RAG_ANSWERS_PER_HOUR` | `200`: at most this many `/api/answer` requests per hour, then 429 (0: no limit). The API has no login and Claude answers are billed: also set a monthly spend limit in the Anthropic Console |
+| `RAG_ANSWERS_PER_HOUR` | `200`: at most this many `/api/answer` requests per hour, then 429 (0: no limit). Claude answers are billed: set `RAG_API_TOKEN` when others can reach the server, and also set a monthly spend limit in the Anthropic Console |
 | `RAG_LLM_CONTEXT_PAGES` / `RAG_LLM_CONTEXT_TOKENS` | `5` / `4000`: how much of the search result goes into the prompt |
+| `RAG_API_TOKEN` | empty: no login. A token that the UI and every endpoint then require, as the password of HTTP Basic auth (the user name is ignored): the browser asks once, `curl -u :TOKEN`, `Authorization: Basic base64(":TOKEN")` |
 | `RAG_ALLOWED_HOSTS` | `127.0.0.1,localhost`: host names the server answers to (see below) |
 
 The server binds to `127.0.0.1` and answers only to requests addressed to `127.0.0.1` or `localhost`,
-so a web page elsewhere can't reach it by DNS rebinding. It has no login: binding to another
-interface (`RAG_HOST=0.0.0.0`) shares the internal docs with the network, and then the machine's
-name has to go into `RAG_ALLOWED_HOSTS`. There are no `/docs` pages (they load scripts from a CDN).
+so a web page elsewhere can't reach it by DNS rebinding. It has no login unless `RAG_API_TOKEN` is set: binding to another
+interface (`RAG_HOST=0.0.0.0`) shares the internal docs with the network, so set the token and put the machine's
+name into `RAG_ALLOWED_HOSTS`. Basic auth sends the token in every request: use it over HTTPS (a reverse proxy) beyond a trusted network. There are no `/docs` pages (they load scripts from a CDN).
 
 Each embedding model gets its own index directory, so models can be compared side by side:
 `scripts/index.sh --model BAAI/bge-base-en-v1.5`, then `scripts/eval.sh --model BAAI/bge-base-en-v1.5`.
@@ -164,7 +165,7 @@ Models are cached in `~/.cache/huggingface` (override with `HF_HOME`). After the
 
 ## API
 
-JSON over HTTP, served by `scripts/serve.sh` next to the UI (no auth: the server answers only to the
+JSON over HTTP, served by `scripts/serve.sh` next to the UI (login only with `RAG_API_TOKEN`: HTTP Basic, the token is the password; the server answers only to the
 host names in `RAG_ALLOWED_HOSTS`, and sends no CORS headers, so other web pages can't call it from a browser).
 
 | Endpoint | Returns |

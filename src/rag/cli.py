@@ -660,6 +660,8 @@ def serve(
     if not Store(store_path(config.EMBED_MODEL)).exists():
         fail(f"No search index for {config.EMBED_MODEL}: run scripts/update.sh (or `rag index`) first")
 
+    if host not in ("127.0.0.1", "localhost", "::1") and not config.API_TOKEN:
+        typer.secho(f"Listening on {host} without RAG_API_TOKEN: anyone who can reach it reads the docs.", fg="yellow", err=True)
     uvicorn.run("rag.api:app", host=host, port=port, reload=reload)
 
 
