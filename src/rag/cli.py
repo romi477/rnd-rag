@@ -51,6 +51,23 @@ def open_searcher(model: str = config.EMBED_MODEL):
         fail(str(exc))
 
 
+def open_module(path: Path, ref: str, tag_prefix: str, series: str):
+    """(module directory, git ref or '', file source) for the --ref / --tag-prefix options of `rag module`."""
+    from rag.sources.odoo_module import DirSource, GitSource, git_location, latest_tag
+
+    path = path.resolve()
+    if not ref and not tag_prefix:
+        if not (path / "__manifest__.py").exists():
+            fail(f"{path} has no __manifest__.py")
+        return path, "", DirSource(path)
+    repo, prefix = git_location(path)
+    if tag_prefix:
+        ref = latest_tag(repo, tag_prefix, series) or ""
+        if not ref:
+            fail(f"no tag {tag_prefix}-{series}.* in {repo}")
+    return path, ref, GitSource(repo, ref, prefix)
+
+
 @module_app.command("inspect")
 def module_inspect(
     path: Path = typer.Argument(..., help="Addon directory (contains __manifest__.py)"),
@@ -60,25 +77,14 @@ def module_inspect(
     origin: str = typer.Option("connector", help="core | connector | customer"),
     json_out: Path = typer.Option(None, "--json", help="Write all units to this JSON file"),
 ) -> None:
-    """Parse an addon offline (no embeddings) and print unit counts by kind."""
+    """Parse an addon offline (no embeddings, graph untouched) and print unit counts by kind."""
     import collections
     import dataclasses
     import json
 
-    from rag.sources.odoo_module import DirSource, GitSource, git_location, latest_tag, parse_module
+    from rag.sources.odoo_module import parse_module
 
-    path = path.resolve()
-    if not (path / "__manifest__.py").exists() and not ref and not tag_prefix:
-        fail(f"{path} has no __manifest__.py")
-    if tag_prefix or ref:
-        repo, prefix = git_location(path)
-        if tag_prefix:
-            ref = latest_tag(repo, tag_prefix, series) or ""
-            if not ref:
-                fail(f"no tag {tag_prefix}-{series}.* in {repo}")
-        source = GitSource(repo, ref, prefix)
-    else:
-        source = DirSource(path)
+    path, ref, source = open_module(path, ref, tag_prefix, series)
     units = parse_module(source, path.name, origin=origin)
     version = next((u.module_version for u in units if u.kind == "manifest"), "?")
     typer.echo(f"{path.name} {version} ({ref or 'working tree'}): {len(units)} units")
@@ -87,6 +93,98 @@ def module_inspect(
     if json_out:
         json_out.write_text(json.dumps([{**dataclasses.asdict(u), "id": u.id} for u in units], indent=1))
         typer.echo(f"wrote {json_out}")
+
+
+@module_app.command("add")
+def module_add(
+    path: Path = typer.Argument(..., help="Addon directory (contains __manifest__.py)"),
+    ref: str = typer.Option("", help="Git ref to read instead of the working tree (tag, branch, sha)"),
+    tag_prefix: str = typer.Option("", help="Resolve the latest <prefix>-<series>.* tag instead of --ref"),
+    series: str = typer.Option("19.0", help="Odoo series for --tag-prefix"),
+    origin: str = typer.Option("connector", help="core | connector | customer"),
+) -> None:
+    """Add (or replace) an addon in the code graph. Embeddings are not built yet."""
+    from rag.code_graph import CodeGraph, ModuleInfo, graph_path
+    from rag.sources.odoo_module import parse_module
+
+    path, ref, source = open_module(path, ref, tag_prefix, series)
+    units = parse_module(source, path.name, origin=origin)
+    if not any(u.kind == "manifest" for u in units):
+        fail(f"{path.name}: no readable __manifest__.py at {ref or 'the working tree'}")
+    graph = CodeGraph.load(graph_path())
+    info = ModuleInfo.from_units(path.name, units, origin, ref)
+    graph.add_module(info, units)
+    graph.save(graph_path())
+    typer.echo(f"{info.name} {info.version} ({ref or 'working tree'}): {len(units)} units")
+    if missing := graph.missing_depends(info.name):
+        typer.echo(f"depends not added yet: {', '.join(missing)} (Odoo core and other repositories are expected here)")
+
+
+@module_app.command("list")
+def module_list() -> None:
+    """Modules in the code graph, dependencies first."""
+    from rag.code_graph import CodeGraph, graph_path
+
+    graph = CodeGraph.load(graph_path())
+    if not graph.modules:
+        typer.echo("no modules; add one with `rag module add`")
+    for name in graph.order():
+        m = graph.modules[name]
+        n_methods = sum(1 for x in graph.methods if x.module == name)
+        typer.echo(f"{name:<28}{m.version:<14}{m.origin:<10}{m.ref or 'working tree':<28}{n_methods:>5} methods")
+
+
+@module_app.command("rm")
+def module_rm(name: str) -> None:
+    """Remove an addon from the code graph."""
+    from rag.code_graph import CodeGraph, graph_path
+
+    graph = CodeGraph.load(graph_path())
+    if name not in graph.modules:
+        fail(f"{name} is not in the graph")
+    graph.remove_module(name)
+    graph.save(graph_path())
+    typer.echo(f"removed {name}")
+
+
+def echo_methods(methods) -> None:
+    for m in methods:
+        flags = [f for f, on in (("super", m.calls_super), ("abstract", m.abstract)) if on]
+        typer.echo(
+            f"  {m.module}: {m.path}:{m.line_start}-{m.line_end}  {m.class_name}.{m.name}"
+            + (f"  [{', '.join(flags)}]" if flags else "")
+        )
+
+
+@module_app.command("chain")
+def module_chain(
+    model: str,
+    method: str,
+    only: list[str] = typer.Option(None, "--only", help="Limit to these modules (repeatable)"),
+) -> None:
+    """Definitions of a method on a model across modules, base first."""
+    from rag.code_graph import CodeGraph, graph_path
+
+    chain = CodeGraph.load(graph_path()).chain(model, method, set(only) if only else None)
+    if not chain:
+        fail(f"{model}.{method} is not defined in the indexed modules")
+    typer.echo(f"{model}.{method}: {len(chain)} definition(s), base first (found statically)")
+    echo_methods(chain)
+
+
+@module_app.command("adapters")
+def module_adapters(method: str) -> None:
+    """The abstract declaration of an adapter method and each connector's implementation."""
+    from rag.code_graph import CodeGraph, graph_path
+
+    group = CodeGraph.load(graph_path()).adapter_group(method)
+    if not group.abstract and not group.impls:
+        fail(f"no adapter method {method}")
+    typer.echo(f"{method}: abstract declaration")
+    echo_methods(group.abstract)
+    typer.echo("implementations")
+    for methods in group.impls.values():
+        echo_methods(methods)
 
 
 @app.command()
