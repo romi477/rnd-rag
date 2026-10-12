@@ -62,3 +62,4 @@ CODE_CONTEXT_TOKENS = int(os.environ.get("RAG_CODE_CONTEXT_TOKENS", 5000))
 CODE_INNER_FRAMES = int(os.environ.get("RAG_CODE_INNER_FRAMES", 3))
 # Source code is not documentation: with the Claude provider, code answers are refused unless this is set to 1.
 CODE_EXTERNAL_LLM = os.environ.get("RAG_CODE_EXTERNAL_LLM", "0") == "1"
+TRACES_FILE = Path(os.environ.get("RAG_TRACES_FILE", ROOT / "eval" / "traces.yaml"))  # cases for `rag eval-traces`

@@ -99,6 +99,17 @@ class CodeGraph:
     def missing_depends(self, name: str) -> list[str]:
         return [d for d in self.modules[name].depends if d not in self.modules]
 
+    def depends_closure(self, name: str) -> set[str]:
+        """The known modules `name` depends on, directly or not (not `name` itself)."""
+        seen: set[str] = set()
+        todo = [d for d in self.modules[name].depends if d in self.modules]
+        while todo:
+            d = todo.pop()
+            if d not in seen and d != name:
+                seen.add(d)
+                todo += [x for x in self.modules[d].depends if x in self.modules]
+        return seen
+
     def order(self) -> list[str]:
         """Module names, dependencies first (by depth among known modules, then by name). Cycles do not loop."""
         depth: dict[str, int] = {}

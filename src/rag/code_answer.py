@@ -57,8 +57,9 @@ ROLE_TEXT = {
 }
 FRAME_MAX_TOKENS = 800  # a longer innermost frame is cut to a window around the failing line
 FRAME_WINDOW = 40  # lines on each side of the failing line
+SEARCH_K_WITH_FRAMES = 2  # search hits next to found frames: a generic message pulls in unrelated code
 CALLER_FULL_TOKENS = 150  # a shorter caller is quoted whole
-CALLER_WINDOW = 3  # lines on each side of the call in a caller
+CALLER_WINDOW = 8  # lines on each side of the call in a caller
 SEARCH_PIECE_CHARS = 1200
 CODE_PIECE_CHARS = 1600
 
@@ -74,6 +75,7 @@ class Piece:
     line_end: int
     label: str
     text: str
+    name: str = ""  # the function / class the piece is about
 
 
 @dataclass
@@ -183,6 +185,11 @@ def gather(
         for fu in frames:
             if not fu.found:
                 ev.notes.append(f"{fu.module}/{fu.path}:{fu.frame.line} (in {fu.frame.func}) is not in the indexed code")
+            elif fu.drifted:
+                ev.notes.append(
+                    f"{fu.module}/{fu.path}:{fu.frame.line} (in {fu.frame.func}) was matched by function name: the line "
+                    f"number differs from the indexed version, the function is at lines {fu.line_start}-{fu.line_end}"
+                )
         found = [fu for fu in frames if fu.found]
         for fu in found:
             if overlaps(pieces, fu.module, fu.path, fu.line_start, fu.line_end):
@@ -197,26 +204,27 @@ def gather(
                     if row := unit_text(store, ref):
                         pieces.append(Piece(
                             role, row["unit_id"], row["module"], row["module_version"], row["path"], row["line_start"],
-                            row["line_end"], f"{ref.class_name}.{ref.name}", signature_and_doc(row["text"]),
+                            row["line_end"], f"{ref.class_name}.{ref.name}", signature_and_doc(row["text"]), ref.name,
                         ))
         for code in ev.tb.error_codes:
             for u in find_error_code(store, code):
                 if not overlaps(pieces, u.module, u.path, u.line_start, u.line_end):
                     pieces.append(Piece(
                         "error code", u.unit_id, u.module, u.module_version, u.path, u.line_start, u.line_end,
-                        f"{code} in {u.name}", u.text[:CODE_PIECE_CHARS],
+                        f"{code} in {u.name}", u.text[:CODE_PIECE_CHARS], u.name,
                     ))
         for module in sorted(visible):
             if note := version_note(client_version, graph.modules[module].version):
                 ev.notes.append(f"{module}: {note}")
     query = " ".join(filter(None, [question.strip(), semantic_query(ev.tb) if ev.tb else ""]))
     if searcher and query:
-        for hit in searcher.search(query, k=search_k, modules=modules or None):
+        k = min(search_k, SEARCH_K_WITH_FRAMES) if any(fu.found for fu in ev.frames) else search_k
+        for hit in searcher.search(query, k=k, modules=modules or None):
             if not overlaps(pieces, hit.module, hit.path, hit.line_start, hit.line_end):
                 owner = f"{hit.model}.{hit.name}" if hit.model and hit.kind == "method" else hit.name
                 pieces.append(Piece(
                     "search", hit.unit_id, hit.module, hit.module_version, hit.path, hit.line_start, hit.line_end,
-                    f"{hit.kind} {owner}", hit.text[:SEARCH_PIECE_CHARS],
+                    f"{hit.kind} {owner}", hit.text[:SEARCH_PIECE_CHARS], hit.name,
                 ))
     return ev
 
@@ -232,7 +240,7 @@ def frame_piece(fu: FrameUnit, role: str) -> Piece:
         text = fu.text
     return Piece(
         role, fu.unit_id, fu.module, fu.module_version, fu.path, fu.line_start, fu.line_end,
-        f"{owner}, line {fu.frame.line} in the traceback", text,
+        f"{owner}, line {fu.frame.line} in the traceback", text, fu.name,
     )
 
 

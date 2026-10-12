@@ -1,0 +1,16 @@
+# Cases for `scripts/eval-traces.sh`. Copy to eval/traces.yaml (git-ignored: real cases come from internal code).
+# cause: where the failure really comes from (any one counts); codes: error codes the evidence must carry;
+# chain: modules that must show a definition of the cause function. group: real | synthetic | drift (an older version's line numbers).
+- id: example-1
+  group: synthetic
+  traceback: |
+    Traceback (most recent call last):
+      File "/opt/project/demo_shop/models/order.py", line 8, in action_sync
+        return super().action_sync()
+      File "/opt/project/demo_core/models/order.py", line 8, in action_sync
+        ErrorStore.raise_error(err_code='E514')
+    odoo.exceptions.UserError: [E514] unpaid invoice
+  cause:
+    - {module: demo_core, function: action_sync}
+  codes: [E514]
+  chain: [demo_core, demo_shop]

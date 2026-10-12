@@ -37,6 +37,7 @@ class FrameUnit:
     line_end: int = 0
     text: str = ""
     extra: dict = field(default_factory=dict)
+    drifted: bool = False  # found by the function's name: the line number does not match this version of the code
 
     @property
     def module(self) -> str:
@@ -68,8 +69,32 @@ def whole_unit(rows: list[dict]) -> dict:
     }
 
 
+def frame_unit(frame: Frame, row: dict, drifted: bool = False) -> FrameUnit:
+    return FrameUnit(
+        frame, True, row["unit_id"], row["kind"], row["name"], row["model"], row["module_version"],
+        row["line_start"], row["line_end"], row["text"], json.loads(row["extra"] or "{}"), drifted,
+    )
+
+
+def unit_rows_by_name(store: CodeStore, frame: Frame) -> list[dict]:
+    """Rows of the methods called `frame.func` in the frame's file, one dict per unit (parts joined)."""
+    rows = store.rows_where(
+        f"module = {sql_str(frame.module)} AND path = {sql_str(frame.rel)} AND kind = 'method' "
+        f"AND name = {sql_str(frame.func)}", COLUMNS,
+    )
+    by_unit: dict[str, list[dict]] = {}
+    for r in rows:
+        by_unit.setdefault(r["unit_id"], []).append(r)
+    return [whole_unit(parts) for parts in by_unit.values()]
+
+
 def resolve_frames(store: CodeStore, tb: ParsedTraceback) -> list[FrameUnit]:
-    """The units of the traceback's own frames, innermost first; frames that match no unit have `found=False`."""
+    """The units of the traceback's own frames, innermost first; frames that match no unit have `found=False`.
+
+    The line decides, unless the unit at the line is not the function the frame names: then the same-named function of
+    that file nearest to the line wins (`drifted`): the client runs another version, whose lines moved. A name that
+    exists nowhere in the file (a nested function such as a decorator's `wrapper`) keeps the unit at the line.
+    """
     out = []
     for frame in tb.own_frames:
         where = (
@@ -77,20 +102,27 @@ def resolve_frames(store: CodeStore, tb: ParsedTraceback) -> list[FrameUnit]:
             f"({', '.join(sql_str(k) for k in CODE_KINDS)}) AND line_start <= {frame.line} AND line_end >= {frame.line}"
         )
         hits = store.rows_where(where, COLUMNS)
-        if not hits:
-            out.append(FrameUnit(frame))
+        at_line = None
+        if hits:
+            part = min(hits, key=lambda r: r["line_end"] - r["line_start"])
+            at_line = whole_unit(store.rows_where(f"unit_id = {sql_str(part['unit_id'])}", COLUMNS))
+        if at_line and at_line["name"] == frame.func:
+            out.append(frame_unit(frame, at_line))
             continue
-        part = min(hits, key=lambda r: r["line_end"] - r["line_start"])
-        unit = whole_unit(store.rows_where(f"unit_id = {sql_str(part['unit_id'])}", COLUMNS))
-        out.append(FrameUnit(
-            frame, True, unit["unit_id"], unit["kind"], unit["name"], unit["model"], unit["module_version"],
-            unit["line_start"], unit["line_end"], unit["text"], json.loads(unit["extra"] or "{}"),
-        ))
+        named = unit_rows_by_name(store, frame) if frame.func else []
+        if named:
+            nearest = min(named, key=lambda r: min(abs(r["line_start"] - frame.line), abs(r["line_end"] - frame.line)))
+            out.append(frame_unit(frame, nearest, drifted=True))
+        elif at_line:
+            out.append(frame_unit(frame, at_line))
+        else:
+            out.append(FrameUnit(frame))
     return out
 
 
 def related_methods(graph: CodeGraph, hit: FrameUnit, visible: set[str]) -> Related:
-    """Overrides of the frame's method in `visible` modules, and for an adapter method its abstract declaration.
+    """Other definitions of the frame's method in `visible` modules and in the modules the frame's module depends on,
+    and for an adapter method its abstract declaration.
 
     Another connector's implementation is not related: the traceback shows which connector failed.
     """
@@ -100,7 +132,9 @@ def related_methods(graph: CodeGraph, hit: FrameUnit, visible: set[str]) -> Rela
     def is_self(m: MethodRef) -> bool:
         return (m.module, m.path, m.line_start) == (hit.module, hit.path, hit.line_start)
 
-    chain = [m for m in graph.chain(hit.model, hit.name, only=visible) if not is_self(m)] if hit.model else []
+    # What the frame's module extends is always related: its base implementation explains the override.
+    allowed = visible | graph.depends_closure(hit.module) | {hit.module}
+    chain = [m for m in graph.chain(hit.model, hit.name, only=allowed) if not is_self(m)] if hit.model else []
     abstract = []
     if hit.extra.get("adapter"):
         abstract = graph.adapter_group(hit.name).abstract

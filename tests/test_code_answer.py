@@ -90,7 +90,7 @@ def test_callers_come_as_signature_plus_the_lines_around_the_call(world, monkeyp
 
 def test_a_frame_outside_the_index_becomes_a_note_not_a_piece(world):  # noqa: F811
     graph, store = world
-    text = TRACEBACK.replace("line 8, in action_sync\n    return super", "line 999, in action_sync\n    return super")
+    text = TRACEBACK.replace("line 8, in action_sync\n    return super", "line 999, in removed_since\n    return super")
     ev = gather(store, graph, "", text, searcher=None)
     assert any("demo_shop/models/order.py:999" in n for n in ev.notes)
     assert [p.module for p in ev.pieces if p.role.startswith("frame")] == ["demo_core"]
@@ -178,3 +178,21 @@ def test_external_llm_is_blocked_for_code_unless_allowed(monkeypatch):
     assert "RAG_CODE_EXTERNAL_LLM" in external_llm_blocked()
     monkeypatch.setattr(config, "CODE_EXTERNAL_LLM", True)
     assert external_llm_blocked() is None
+
+
+def test_a_frame_resolved_by_name_after_a_line_shift_gets_a_note_and_a_piece(world):  # noqa: F811
+    graph, store = world
+    text = TRACEBACK.replace("line 8, in action_sync\n    return super", "line 999, in action_sync\n    return super")
+    ev = gather(store, graph, "", text, searcher=None)
+    assert any("demo_shop/models/order.py:999" in n and "function name" in n for n in ev.notes)
+    assert ("frame", "demo_shop") in [(p.role, p.module) for p in ev.pieces]
+
+
+def test_search_adds_fewer_hits_when_the_frames_already_point_at_the_code(world):  # noqa: F811
+    from rag.code_answer import SEARCH_K_WITH_FRAMES
+
+    graph, store = world
+    searcher = CodeSearcher(FakeEmbedder(), store)
+    with_frames = gather(store, graph, "", TRACEBACK, searcher=searcher)
+    assert sum(p.role == "search" for p in with_frames.pieces) <= SEARCH_K_WITH_FRAMES
+    assert SEARCH_K_WITH_FRAMES < 6  # the default number of hits without frames

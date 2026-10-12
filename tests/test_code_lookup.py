@@ -51,9 +51,9 @@ def test_frames_resolve_to_units_innermost_first_with_the_whole_text(world):
     assert top.text.startswith("def action_sync(self):") and "return True" in top.text
 
 
-def test_a_line_outside_every_unit_is_reported_not_found(world):
+def test_a_line_outside_every_unit_with_an_unknown_name_is_reported_not_found(world):
     graph, store = world
-    (hit,) = resolve_frames(store, tb(graph, ("demo_core/models/order.py", 999, "action_sync")))
+    (hit,) = resolve_frames(store, tb(graph, ("demo_core/models/order.py", 999, "removed_since")))
     assert not hit.found and hit.text == ""
 
 
@@ -77,7 +77,51 @@ def test_related_methods_are_the_overrides_in_visible_modules_without_the_frame_
     shop_hit = next(f for f in resolve_frames(store, parsed) if f.module == "demo_shop")
     related = related_methods(graph, shop_hit, visible={"demo_core", "demo_shop"})
     assert [m.module for m in related.chain] == ["demo_core"]
-    assert related_methods(graph, shop_hit, visible={"demo_shop"}).chain == []
+    # what the module extends is always related, the traceback shows it or not
+    assert [m.module for m in related_methods(graph, shop_hit, visible={"demo_shop"}).chain] == ["demo_core"]
+
+
+def test_a_sibling_module_that_overrides_the_method_is_not_related_unless_visible(world, tmp_path):  # noqa: F811
+    from test_code_graph import EXTRA_ORDER, build
+
+    graph, store = world
+    graph.add_module(*build(tmp_path, "demo_woo", ["demo_core"], {"models/order.py": EXTRA_ORDER}))
+    parsed = tb(graph, ("demo_shop/models/order.py", 8, "action_sync"))
+    (hit,) = resolve_frames(store, parsed)
+    assert [m.module for m in related_methods(graph, hit, visible={"demo_shop"}).chain] == ["demo_core"]
+    assert "demo_woo" in [m.module for m in related_methods(graph, hit, visible={"demo_shop", "demo_woo"}).chain]
+
+
+def test_a_frame_whose_line_landed_in_another_function_is_resolved_by_name(world):  # noqa: F811
+    graph, store = world
+    # line 11 is inside `other` in this version; the client's version had action_sync there
+    (hit,) = resolve_frames(store, tb(graph, ("demo_core/models/order.py", 11, "action_sync")))
+    assert hit.found and hit.name == "action_sync" and hit.drifted is True
+    assert (hit.line_start, hit.line_end) == (7, 8)
+
+
+def test_a_frame_beyond_the_end_of_the_file_is_resolved_by_name_too(world):  # noqa: F811
+    graph, store = world
+    (hit,) = resolve_frames(store, tb(graph, ("demo_core/models/order.py", 999, "action_sync")))
+    assert hit.found and hit.name == "action_sync" and hit.drifted is True
+
+
+def test_a_matching_name_at_the_line_is_not_drift(world):  # noqa: F811
+    graph, store = world
+    (hit,) = resolve_frames(store, tb(graph, ("demo_core/models/order.py", 8, "action_sync")))
+    assert hit.drifted is False
+
+
+def test_same_named_units_resolve_to_the_one_nearest_the_line(world, tmp_path):  # noqa: F811
+    from test_code_graph import build
+
+    graph, store = world
+    twice = "class A:\n    def run(self):\n        return 1\n\n\nclass B:\n    def run(self):\n        return 2\n"
+    info, units = build(tmp_path, "demo_twice", ["demo_core"], {"twice.py": twice})
+    graph.add_module(info, units)
+    index_module(store, FakeEmbedder(), "demo_twice", units, max_tokens=150, log=lambda m: None)
+    (hit,) = resolve_frames(store, tb(graph, ("demo_twice/twice.py", 90, "run")))
+    assert hit.line_start == 7 and hit.drifted is True
 
 
 def test_adapter_frame_brings_the_abstract_declaration_but_only_its_own_implementation(world):

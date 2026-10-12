@@ -447,6 +447,47 @@ def ask(
             typer.echo()
 
 
+@app.command("eval-traces")
+def eval_traces(
+    file: Path = typer.Option(config.TRACES_FILE, help="YAML list of traceback cases"),
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+    search: bool = typer.Option(True, help="Include the semantic search hits (--no-search: frames and error codes only)"),
+    misses: bool = typer.Option(False, help="List the cases whose cause is not first or not sent to the LLM"),
+) -> None:
+    """Does the evidence for each traceback contain the function the failure comes from? (no LLM)"""
+    from rag.code_graph import CodeGraph, graph_path
+    from rag.code_search import CodeSearcher
+    from rag.code_store import CodeStore
+    from rag.store import store_path
+    from rag.trace_eval import evaluate_case, load_cases, summarize
+
+    if not file.exists():
+        fail(f"{file} not found: copy eval/traces.example.yaml and describe your cases")
+    graph, store = CodeGraph.load(graph_path()), CodeStore(store_path(model))
+    if not graph.modules or not store.exists():
+        fail("No code index; add modules with `rag module add` first")
+    searcher = CodeSearcher(make_embedder(model), store) if search else None
+    results = []
+    for case in load_cases(file):
+        results.append(evaluate_case(case, store, graph, searcher))
+    typer.echo(f"model={model} cases={len(results)} search={'on' if search else 'off'}")
+    typer.echo(f"{'group':<12}{'n':>4}{'frames':>9}{'cause@1':>9}{'cause@3':>9}{'sent':>7}{'codes':>8}{'chain':>8}")
+    show = lambda v: "-" if v is None else f"{v:.2f}"  # noqa: E731
+    for group, row in sorted(summarize(results).items(), key=lambda kv: (kv[0] == "all", kv[0])):
+        typer.echo(
+            f"{group:<12}{row['n']:>4}{show(row['frames']):>9}{show(row['cause@1']):>9}{show(row['cause@3']):>9}"
+            f"{show(row['cause_sent']):>7}{show(row['codes']):>8}{show(row['chain']):>8}"
+        )
+    if misses:
+        typer.secho("\ncases without the cause first or sent to the LLM", bold=True)
+        for r in results:
+            if r.cause_rank != 1 or not r.cause_sent or r.codes_found is False or r.chain_ok is False:
+                typer.echo(
+                    f"  {r.id} [{r.group}] frames {r.frames_found}/{r.frames_total} cause rank {r.cause_rank or '-'}"
+                    f"{'' if r.cause_sent else ' (not sent)'} codes {r.codes_found} chain {r.chain_ok}"
+                )
+
+
 @app.command()
 def bench(
     models: list[str] = typer.Argument(None, help="LLM ids to compare (default: the loaded one)"),
