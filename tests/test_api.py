@@ -95,3 +95,9 @@ def test_no_docs_pages(client):
 def test_ui_files_are_revalidated(client):
     assert client.get("/").headers["cache-control"] == "no-cache"
     assert "cache-control" not in client.get("/api/products").headers
+
+
+def test_favicon_is_served_and_linked(client):
+    icon = client.get("/favicon.svg")
+    assert icon.status_code == 200 and icon.headers["content-type"].startswith("image/svg+xml")
+    assert 'rel="icon" href="favicon.svg"' in client.get("/").text

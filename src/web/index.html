@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Docs Search</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="styles.css">
 <script>
   // The saved theme before the first paint, so a dark page does not flash light (app.js does the rest).
@@ -12,8 +13,14 @@
 </head>
 <body>
 <main>
+  <div class="chrome" id="chrome">
   <header class="top">
     <h1>Docs Search <span>· R&amp;D Products Documentation</span></h1>
+    <!-- The view belongs to the tab: Search runs queries, Browse lists every article. -->
+    <div class="view-switch" role="group" aria-label="View">
+      <button type="button" id="view-search" aria-pressed="true">Search</button>
+      <button type="button" id="view-browse" aria-pressed="false" title="All articles of the documentation">Browse</button>
+    </div>
     <div class="tools">
       <button type="button" id="clear" class="icon-btn" title="Clear search" aria-label="Clear search">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -35,18 +42,23 @@
   <nav id="tabs" class="tabs" role="tablist" aria-label="Searches"></nav>
   <form id="form">
     <input id="q" type="search" maxlength="500" placeholder="Ask about connectors, Direct Print, labels…  (press / to focus)" autocomplete="off" autofocus>
-    <button type="submit" id="submit">Find</button>
+    <div class="actions search-only">
+      <button type="button" id="stop" class="secondary" hidden>Stop</button>
+      <!-- Never disabled: an Enter pressed right after typing must still submit; run() ignores an empty query. -->
+      <button type="submit" id="submit">Find</button>
+    </div>
     <div class="filters">
       <label title="Search only the pages of one product (a top-level section of the documentation).">Product <select id="product"><option value="">All</option></select></label>
-      <label title="How fragments are found:&#10;Hybrid: by meaning and by exact words together (default, best overall).&#10;Semantic: by meaning only; finds paraphrases.&#10;Keyword: exact words only (BM25); good for error codes, module and setting names.">Mode
+      <span id="browse-count" class="browse-only"></span>
+      <label class="search-only" title="How fragments are found:&#10;Hybrid: by meaning and by exact words together (default, best overall).&#10;Semantic: by meaning only; finds paraphrases.&#10;Keyword: exact words only (BM25); good for error codes, module and setting names.">Mode
         <select id="mode">
           <option value="hybrid">Hybrid</option>
           <option value="vector">Semantic</option>
           <option value="fts">Keyword</option>
         </select>
       </label>
-      <label title="A second model re-reads the top 10 fragments together with the question and re-orders them by relevance (0..1). Pages scoring below 0.1 are collapsed as low relevance and never sent to the LLM. Adds a fraction of a second."><input type="checkbox" id="rerank" checked> Rerank &amp; filter</label>
-      <span class="llm-group">
+      <label class="search-only" title="A second model re-reads the top 10 fragments together with the question and re-orders them by relevance (0..1). Pages scoring below 0.1 are collapsed as low relevance and never sent to the LLM. Adds a fraction of a second."><input type="checkbox" id="rerank" checked> Rerank &amp; filter</label>
+      <span class="llm-group search-only">
         <label id="llm-label" title="Also write an answer from the top pages with the local LLM (LM Studio), citing them as [n]. Check the answer against the cited sources."><input type="checkbox" id="llm"> Answer with LLM</label>
         <select id="model" aria-label="LLM model" title="The LLM that writes the answer. Default: the model loaded in LM Studio. Models marked (not loaded) are loaded on first use, which takes a while."><option value="">Default</option></select>
         <button type="button" id="refresh-models" class="icon-btn" title="Refresh the model list (which models are loaded in LM Studio)" aria-label="Refresh the model list">
@@ -57,9 +69,12 @@
       </span>
     </div>
   </form>
+  </div>
+  <div id="banner" class="banner" role="alert" hidden></div>
   <div id="status"></div>
   <section id="answer" class="answer" hidden></section>
   <div id="results"></div>
+  <div id="browse"></div>
 </main>
 <script src="app.js"></script>
 </body>

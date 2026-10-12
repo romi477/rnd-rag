@@ -34,8 +34,12 @@ and answer) and tabs survive a page reload. To compare models, run the same ques
 with different models. Models marked "(not loaded)" are loaded by LM Studio on first use.
 Result cards collapse to their title: the answer and the first card start expanded, the rest
 collapsed, and a citation [n] expands the card it points to.
-Only the button runs a query: it reads "Find", or "Ask" when "Answer with LLM" is on. Changing
-settings afterwards marks the results as outdated until the next run. The eraser icon clears the tab.
+Only the button runs a query: it reads "Find", or "Ask" when "Answer with LLM" is on, and "Stop"
+next to it cancels a running request (what has streamed so far stays). Changing settings afterwards
+marks the results as outdated until the next run. The eraser icon clears the tab.
+The Search / Browse switch in the header belongs to the tab: Browse lists every indexed article
+(`/api/pages`) grouped by product and section, narrowed by the product filter and by the words typed
+in the title filter; each view keeps its own text, and `?view=browse&filter=...` opens it directly.
 Cards are numbered by rank; with an LLM answer, the cards used as sources keep a filled badge with
 their source number. The bug icon turns on debug mode: under each card and fragment it shows how the
 fragment was scored (`vector #rank cosine · bm25 #rank score · rrf · retrieval #rank · rerank`).

@@ -16,12 +16,20 @@ const controllers = {}; // tab id -> AbortController of its in-flight request
 let llmInfo = {available: false, model: null, models: [], error: "not checked yet", checked: false};
 let products = null; // product filter options, null until loaded
 const MODES = ["hybrid", "vector", "fts"];
+const VIEWS = ["search", "browse"];
+const SEARCH_PLACEHOLDER = $("q").placeholder;
+let metaError = ""; // the product list could not be loaded
+// Browse: every indexed article (GET /api/pages), loaded once and shared by all tabs.
+let pages = null;
+let pagesError = "";
+let pagesPromise = null;
 
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+// view: "search" or "browse" (the title filter of the article list is `filter`, kept apart from the query `q`).
 function newTab(init = {}) {
-  return {id: newId(), q: "", product: "", mode: "hybrid", rerank: true, llm: false, model: "",
-          data: null, answer: null, status: "", busy: false, ...init};
+  return {id: newId(), view: "search", q: "", filter: "", product: "", mode: "hybrid", rerank: true, llm: false, model: "",
+          data: null, answer: null, status: "", error: "", busy: false, ...init};
 }
 
 const activeTab = () => tabs.find((t) => t.id === activeId);
@@ -55,6 +63,9 @@ function saveSoon() {
   if (!saveTimer) saveTimer = setTimeout(save, 500);
 }
 
+// A reload or close inside that half second would lose the last tokens or the last typed filter.
+window.addEventListener("pagehide", () => { if (saveTimer) save(); });
+
 function readStored() {
   try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch { return null; }
 }
@@ -84,41 +95,62 @@ window.addEventListener("storage", (e) => {
 function sanitize(t) {
   const tab = {...newTab(), ...t};
   if (!MODES.includes(tab.mode)) tab.mode = "hybrid";
-  for (const k of ["q", "product", "model"]) if (typeof tab[k] !== "string") tab[k] = "";
+  if (!VIEWS.includes(tab.view)) tab.view = "search";
+  for (const k of ["q", "filter", "product", "model", "error"]) if (typeof tab[k] !== "string") tab[k] = "";
   tab.q = tab.q.slice(0, 500);
+  tab.filter = tab.filter.slice(0, 500);
   for (const k of ["rerank", "llm"]) tab[k] = !!tab[k];
   return tab;
 }
 
 const hasOption = (select, value) => [...$(select).options].some((o) => o.value === value);
 
+// The one input holds the query in the Search view and the title filter in Browse: each keeps its own text.
 function readForm(tab) {
-  tab.q = $("q").value.trim();
-  // until the options are loaded, the selects can't show the tab's choice: keep it
-  if (products) tab.product = $("product").value;
+  if (tab.view === "browse") tab.filter = $("q").value.slice(0, 500);
+  else tab.q = $("q").value.trim();
+  tab.product = $("product").value;
   tab.mode = $("mode").value;
   tab.rerank = $("rerank").checked;
   tab.llm = $("llm").checked;
   if (llmInfo.checked) tab.model = $("model").value;
 }
 
+// Options of the product select. Until the list is loaded (or when it failed to load) the tab's own product
+// stays listed, so that the select shows what the search will really filter by.
+function fillProducts(tab) {
+  const list = products || [];
+  if (products && !products.includes(tab.product)) tab.product = ""; // a product that no longer exists
+  const options = tab.product && !list.includes(tab.product) ? [tab.product, ...list] : list;
+  $("product").innerHTML = '<option value="">All</option>' + options.map((p) => `<option>${escapeHtml(p)}</option>`).join("");
+  $("product").value = tab.product;
+}
+
+function updatePlaceholder(tab) {
+  $("q").placeholder = tab.view !== "browse" ? SEARCH_PLACEHOLDER
+    : pages ? `Filter ${pages.length} articles by title…` : "Filter articles by title…";
+}
+
 function writeForm(tab) {
-  // a product or model that no longer exists falls back to "all" / the default model
-  if (products && !hasOption("product", tab.product)) tab.product = "";
+  const browse = tab.view === "browse";
+  fillProducts(tab);
+  // a model that no longer exists falls back to the default model
   if (llmInfo.checked && !hasOption("model", tab.model)) tab.model = "";
-  $("q").value = tab.q;
-  $("product").value = hasOption("product", tab.product) ? tab.product : "";
+  $("q").value = browse ? tab.filter : tab.q;
+  updatePlaceholder(tab);
   $("mode").value = tab.mode;
   $("rerank").checked = tab.rerank;
   $("llm").checked = tab.llm;
   $("model").value = hasOption("model", tab.model) ? tab.model : "";
+  for (const view of VIEWS) $(`view-${view}`).setAttribute("aria-pressed", String(tab.view === view));
   updateSubmitLabel(tab);
 }
 
 // Only the Find / Ask button runs a query; changing settings just marks the results as outdated.
+// The model matters only when the answer is written by the LLM.
 const SETTINGS = ["q", "product", "mode", "rerank", "llm", "model"];
 const settingsOf = (tab) => Object.fromEntries(SETTINGS.map((k) => [k, tab[k]]));
-const isStale = (tab) => !!(tab.data && tab.ran && SETTINGS.some((k) => tab.ran[k] !== tab[k]));
+const isStale = (tab) => !!(tab.data && tab.ran && SETTINGS.some((k) => tab.ran[k] !== tab[k] && (k !== "model" || tab.llm)));
 
 const submitLabel = (tab) => (tab.llm && llmInfo.available ? "Ask" : "Find");
 
@@ -137,7 +169,9 @@ function onSettingsChange() {
   readForm(tab);
   updateSubmitLabel(tab);
   $("status").textContent = statusText(tab);
+  if (tab.view === "browse") renderBrowse(tab); // the product narrows the article list
   renderTabs(); // the tab shows the chosen LLM model
+  updateUrl(tab);
   save();
 }
 
@@ -195,8 +229,15 @@ function statusOf(data) {
 // Cards are collapsible: the first one starts expanded, the rest collapsed; toggles are kept per tab.
 const isOpen = (tab, pageId, i) => tab.open?.[pageId] ?? i === 0;
 
+// What the Search view shows before the first search of a tab.
+const HINT = `<div class="hint-empty">
+  <div>Search the product documentation.</div>
+  <div class="hint">Turn on "Answer with LLM" to get an answer with links to the sources.</div>
+  <div class="hint">Not sure what to look for? <a href="#" data-browse>Browse all articles</a></div>
+</div>`;
+
 function renderResults(data, tab) {
-  if (!data) { $("results").innerHTML = ""; return; }
+  if (!data) { $("results").innerHTML = tab.busy || tab.error ? "" : HINT; return; }
   const ts = terms(data.query);
   if (!data.results.length) {
     $("results").innerHTML = '<div class="empty">Nothing found. Try other words or switch the mode.</div>';
@@ -252,6 +293,7 @@ function setDebug(on) {
 function markFilterRows() {
   let prev = null;
   for (const el of document.querySelector(".filters").children) {
+    if (!el.getClientRects().length) continue; // not shown in this view
     // filters are centred vertically and differ in height: a new row starts below the previous one
     el.classList.toggle("row-start", !prev || el.offsetTop >= prev.offsetTop + prev.offsetHeight);
     prev = el;
@@ -281,8 +323,12 @@ function toggleTheme() {
   applyTheme(next);
 }
 
+// Only http(s) links reach an href: the URL comes from the index, not from this page.
+const safeUrl = (url) => (/^https?:\/\//i.test(url || "") ? url : null);
+
 function card(p, ts, open, rank) {
   const crumbs = p.breadcrumbs.join(" › ") || p.product;
+  const href = safeUrl(p.url);
   const updated = p.updated ? new Date(p.updated).toLocaleDateString() : "";
   const chunks = p.chunks.map((c, ci) => `
     <div class="chunk">
@@ -295,7 +341,7 @@ function card(p, ts, open, rank) {
     <details class="result" data-page-id="${escapeHtml(p.page_id)}"${open ? " open" : ""}>
       <summary>
         <div class="crumbs">${escapeHtml(crumbs)}</div>
-        <h2><span class="rank-badge" title="Rank ${rank}">${rank}</span><a href="${escapeHtml(p.url)}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a></h2>
+        <h2><span class="rank-badge" title="Rank ${rank}">${rank}</span>${href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a>` : escapeHtml(p.title)}</h2>
         <div class="meta"><span>Updated ${updated}</span>${p.labels.length ? `<span>${p.labels.map(escapeHtml).join(", ")}</span>` : ""}<span>score ${p.score.toFixed(3)}</span></div>
         ${signalsHtml(p.chunks[0]?.signals)}
       </summary>
@@ -330,7 +376,8 @@ function renderMarkdown(text, sources) {
   const closeLists = (indent = -1) => {
     while (lists.length && lists.at(-1).indent > indent) html += `</li></${lists.pop().tag}>`;
   };
-  for (const line of text.split("\n")) {
+  // Some models answer with CRLF: a "\r" left at the end of a line would defeat the "$" of the patterns below.
+  for (const line of text.split(/\r?\n/)) {
     if (fence) {
       if (line.trim().startsWith(fence) && !line.trim().slice(fence.length).trim()) {
         html += `<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`;
@@ -407,19 +454,30 @@ function renderAnswerText(answer) {
 // --- view -----------------------------------------------------------------------
 
 function renderTabs() {
+  $("stop").hidden = !activeTab()?.busy; // Stop belongs to the form: it follows the active tab's request
   // Tabs are named by position: Tab1, Tab2...; the query shows in the tooltip.
   $("tabs").innerHTML = tabs.map((t, i) => `
-    <div class="tab${t.id === activeId ? " active" : ""}" data-id="${t.id}" title="${escapeHtml(t.q || "New search")}" role="tab" aria-selected="${t.id === activeId}" tabindex="${t.id === activeId ? 0 : -1}">
+    <div class="tab${t.id === activeId ? " active" : ""}" data-id="${t.id}" title="${escapeHtml(t.view === "browse" ? `Browse: ${t.filter || "all articles"}` : t.q || "New search")}" role="tab" aria-selected="${t.id === activeId}" tabindex="${t.id === activeId ? 0 : -1}">
       ${t.busy ? '<span class="tab-busy" aria-label="loading"></span>' : ""}
       <span class="tab-title">Tab${i + 1}</span>
-      ${t.llm && t.model ? `<span class="tab-model">${escapeHtml(t.model.split("/").pop())}</span>` : ""}
+      ${t.view === "browse" ? '<span class="tab-model">browse</span>' : t.llm && t.model ? `<span class="tab-model">${escapeHtml(t.model.split("/").pop())}</span>` : ""}
       ${tabs.length > 1 ? `<button class="tab-close" data-close="${t.id}" aria-label="Close tab" title="Close tab">×</button>` : ""}
     </div>`).join("") +
     '<button class="tab-add" data-add title="New tab" aria-label="New tab">+</button>';
 }
 
+// A problem the user should notice: the last request of the tab failed, or a list could not be loaded.
+function renderBanner(tab) {
+  const text = (tab.view === "browse" ? pagesError : tab.error) || metaError;
+  $("banner").textContent = text;
+  $("banner").hidden = !text;
+}
+
 // Results + answer of a tab (the form is written only on tab switch, so typing isn't clobbered).
 function renderContent(tab) {
+  document.body.dataset.view = tab.view; // CSS shows the parts of the page that belong to the view
+  renderBanner(tab);
+  if (tab.view === "browse") { renderBrowse(tab); return; }
   $("status").textContent = statusText(tab);
   renderResults(tab.data, tab);
   renderAnswer(tab.answer); // set only when the last run used the LLM
@@ -432,9 +490,116 @@ function renderView() {
   writeForm(tab);
   renderContent(tab);
   updateUrl(tab);
+  markFilterRows(); // the view shows other filters
+}
+
+// --- Browse: every article, filtered by title as the user types -------------------------
+
+// Articles of the product whose title has every word of the filter, grouped by product and section (the first two
+// breadcrumbs). The server sends them sorted by product and path, so a group is a run of neighbours.
+function groupPages(list, product, filter) {
+  const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+  const groups = [];
+  let count = 0;
+  for (const p of list) {
+    const title = p.title || "";
+    if ((product && p.product !== product) || !words.every((w) => title.toLowerCase().includes(w))) continue;
+    const name = (p.breadcrumbs?.length ? p.breadcrumbs.slice(0, 2) : [p.product]).join(" · ");
+    if (groups.at(-1)?.name !== name) groups.push({name, items: []});
+    groups.at(-1).items.push({p, title: highlight(title, words)});
+    count++;
+  }
+  return {count, groups};
+}
+
+function renderBrowse(tab) {
+  if (!pages) {
+    $("browse-count").textContent = "";
+    $("browse").innerHTML = pagesError ? "" : '<div class="empty">Loading the articles…</div>';
+    return;
+  }
+  const {count, groups} = groupPages(pages, tab.product, tab.filter);
+  $("browse-count").textContent = `${count} article${count === 1 ? "" : "s"}`;
+  $("browse").innerHTML = count ? groups.map((g) => `
+    <section class="group">
+      <h3 class="group-name">${escapeHtml(g.name)}</h3>
+      <ul>${g.items.map(({p, title}) => {
+        const href = safeUrl(p.url);
+        const date = p.updated ? new Date(p.updated).toLocaleDateString() : "";
+        return `<li class="page">${href
+          ? `<a class="page-title" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="Open in Confluence">${title}</a>`
+          : `<span class="page-title">${title}</span>`}${date ? `<span class="page-date">${escapeHtml(date)}</span>` : ""}</li>`;
+      }).join("")}</ul>
+    </section>`).join("") : '<div class="empty">No article title matches. Clear the filter or choose another product.</div>';
+}
+
+// The article list and the product list load once; a failed load is retried when they are needed again.
+function loadPages() {
+  if (!pagesPromise) {
+    pagesPromise = (async () => {
+      try {
+        const res = await fetch("/api/pages");
+        if (!res.ok) throw await httpError(res);
+        pages = (await res.json()).pages || [];
+        pagesError = "";
+      } catch (err) {
+        pagesError = "Could not load the articles: " + err.message;
+        pagesPromise = null;
+      }
+      const tab = activeTab();
+      if (tab) { updatePlaceholder(tab); renderContent(tab); } // not writeForm: the user may be typing a filter
+    })();
+  }
+  return pagesPromise;
+}
+
+let productsPromise = null;
+function loadProducts() {
+  if (!productsPromise) {
+    productsPromise = (async () => {
+      try {
+        const res = await fetch("/api/products");
+        if (!res.ok) throw await httpError(res);
+        products = await res.json();
+        metaError = "";
+      } catch (err) {
+        metaError = "Could not load the products: " + err.message;
+        productsPromise = null;
+      }
+      const tab = activeTab();
+      if (tab) {
+        readForm(tab); // keep a product picked meanwhile: the options are rebuilt
+        fillProducts(tab);
+        renderBanner(tab);
+        if (tab.view === "browse") renderBrowse(tab);
+      }
+    })();
+  }
+  return productsPromise;
+}
+
+// Switch the active tab between searching and browsing; each view keeps the text typed in it.
+function setView(view) {
+  const tab = activeTab();
+  if (!tab || tab.view === view) return;
+  readForm(tab);
+  tab.view = view;
+  if (view === "browse") loadPages();
+  loadProducts();
+  renderView();
+  save();
+  $("q").focus();
+  $("q").select();
 }
 
 function updateUrl(tab) {
+  if (tab.view === "browse") {
+    const params = new URLSearchParams({view: "browse"});
+    if (tab.product) params.set("product", tab.product);
+    if (tab.filter) params.set("filter", tab.filter);
+    history.replaceState(null, "", "?" + params);
+    return;
+  }
   if (!tab.q) { history.replaceState(null, "", location.pathname); return; }
   const params = new URLSearchParams({q: tab.q, mode: tab.mode, rerank: tab.rerank});
   if (tab.product) params.set("product", tab.product);
@@ -475,13 +640,22 @@ function closeTab(id) {
   save();
 }
 
-// Clear the active tab: query, results and answer; the filters stay.
+// Clear the active tab: query, results and answer; the filters stay. In Browse it clears the title filter.
 function clearResults() {
   const tab = activeTab();
   if (!tab) return;
+  if (tab.view === "browse") {
+    tab.filter = "";
+    $("q").value = "";
+    renderBrowse(tab);
+    updateUrl(tab);
+    save();
+    $("q").focus();
+    return;
+  }
   controllers[tab.id]?.abort();
   delete controllers[tab.id];
-  Object.assign(tab, {q: "", data: null, answer: null, status: "", busy: false, open: {}});
+  Object.assign(tab, {q: "", data: null, answer: null, status: "", error: "", busy: false, open: {}});
   $("q").value = "";
   renderTabs();
   renderContent(tab);
@@ -550,18 +724,34 @@ async function runAnswer(tab, params, signal) {
   if (a.streaming) { a.streaming = false; a.error = "The connection closed before the answer was complete."; }
 }
 
+// Stop the request of the active tab. What has streamed so far stays on the screen.
+function stopRun() {
+  const tab = activeTab();
+  const controller = tab && controllers[tab.id];
+  if (!controller) return;
+  delete controllers[tab.id];
+  controller.abort();
+  tab.busy = false;
+  if (tab.answer?.streaming) Object.assign(tab.answer, {streaming: false, error: "Stopped."});
+  if (!tab.data) tab.status = "Stopped.";
+  renderTabs();
+  renderContent(tab);
+  save();
+}
+
 async function run() {
   const tab = activeTab();
-  if (!tab) return;
+  if (!tab || tab.view === "browse") return; // Browse filters as the user types: Enter has nothing to run
   readForm(tab);
   if (!tab.q) return;
+  loadProducts(); // retried here if the first load failed
   const useLlm = tab.llm && llmInfo.available;
   const params = new URLSearchParams({q: tab.q, mode: tab.mode, rerank: tab.rerank});
   if (tab.product) params.set("product", tab.product);
 
   controllers[tab.id]?.abort();
   const controller = controllers[tab.id] = new AbortController();
-  Object.assign(tab, {status: "Searching…", data: null, busy: true, open: {}, ran: settingsOf(tab),
+  Object.assign(tab, {status: "Searching…", error: "", data: null, busy: true, open: {}, ran: settingsOf(tab),
     answer: useLlm ? {text: "", sources: [], streaming: true, model: tab.model || llmInfo.model} : null});
   renderTabs();
   renderContent(tab);
@@ -577,7 +767,8 @@ async function run() {
     }
   } catch (err) {
     if (err.name === "AbortError") return; // superseded by a newer request or tab closed
-    tab.status = "Error: " + err.message;
+    tab.error = err.message;
+    if (!tab.data) tab.status = "";
     if (tab.answer) tab.answer.streaming = false;
   }
   if (controllers[tab.id] !== controller) return;
@@ -611,17 +802,23 @@ const flag = (v, fallback) => (v === null ? fallback : ["1", "true", "yes", "on"
 
 // A shared link (?q=...) shows the tab with exactly these settings (the active one first),
 // or opens a new tab and runs it.
+// ?view=browse[&product=...&filter=...] opens the article list the same way (nothing to run).
 function openFromUrl() {
   const params = new URLSearchParams(location.search);
-  if (!params.get("q")) return false;
-  const wanted = sanitize({q: params.get("q").trim(), product: params.get("product") || "", mode: params.get("mode") || "hybrid",
-    rerank: flag(params.get("rerank"), true), llm: flag(params.get("llm"), false), model: params.get("model") || ""});
-  const same = (t) => SETTINGS.every((k) => t[k] === wanted[k] || (k === "model" && !t.llm));
+  const browse = params.get("view") === "browse";
+  if (!browse && !params.get("q")) return false;
+  const wanted = browse
+    ? sanitize({view: "browse", product: params.get("product") || "", filter: params.get("filter") || ""})
+    : sanitize({q: params.get("q").trim(), product: params.get("product") || "", mode: params.get("mode") || "hybrid",
+        rerank: flag(params.get("rerank"), true), llm: flag(params.get("llm"), false), model: params.get("model") || ""});
+  const same = browse
+    ? (t) => t.view === "browse" && t.product === wanted.product && t.filter === wanted.filter
+    : (t) => t.view === "search" && SETTINGS.every((k) => t[k] === wanted[k] || (k === "model" && !t.llm));
   const existing = [activeTab(), ...tabs].find((t) => t && same(t));
-  if (existing) { activeId = existing.id; return !existing.data; }
+  if (existing) { activeId = existing.id; return !browse && !existing.data; }
   tabs.push(wanted);
   activeId = wanted.id;
-  return true;
+  return !browse;
 }
 
 async function init() {
@@ -634,18 +831,37 @@ async function init() {
   renderView();
   markFilterRows();
   refreshLlmStatus(); // LM Studio may be slow to answer: don't wait for it
-  const list = await fetch("/api/products").then((r) => (r.ok ? r.json() : [])).catch(() => []);
-  $("product").insertAdjacentHTML("beforeend", list.map((p) => `<option>${escapeHtml(p)}</option>`).join(""));
-  products = list;
-  const tab = activeTab();
-  if (hasOption("product", tab.product)) $("product").value = tab.product; else tab.product = "";
+  if (activeTab().view === "browse") loadPages();
+  await loadProducts();
   if (runNow) run();
 }
 
 $("form").addEventListener("submit", (e) => { e.preventDefault(); run(); });
+$("stop").addEventListener("click", stopRun);
 $("clear").addEventListener("click", clearResults);
+for (const view of VIEWS) $(`view-${view}`).addEventListener("click", () => setView(view));
+$("results").addEventListener("click", (e) => {
+  if (!e.target.closest("[data-browse]")) return;
+  e.preventDefault();
+  setView("browse");
+});
+$("q").addEventListener("input", () => {  // Browse filters as the user types
+  const tab = activeTab();
+  if (tab?.view !== "browse") return;
+  tab.filter = $("q").value.slice(0, 500);
+  renderBrowse(tab);
+  updateUrl(tab);
+  saveSoon();
+});
 $("debug").addEventListener("click", () => setDebug(!debug));
 $("theme").addEventListener("click", toggleTheme);
+{ // the sticky block's height, for what has to stick or scroll to just below it
+  const chrome = $("chrome");
+  const publish = () => document.documentElement.style.setProperty(
+    "--chrome-h", getComputedStyle(chrome).position === "sticky" ? `${chrome.offsetHeight}px` : "0px");
+  new ResizeObserver(publish).observe(chrome);
+  publish();
+}
 { // the row breaks move when the window or a filter (e.g. the model list) changes width
   const rows = new ResizeObserver(markFilterRows);
   rows.observe(document.querySelector(".filters"));

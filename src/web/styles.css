@@ -3,6 +3,7 @@
   --bg: #f7f7f5; --surface: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
   --border: #e3e2dd; --accent: #2f5bd3; --accent-soft: #e8eefc; --mark: #fff1a8;
   --code-bg: #f2f1ed; --on-accent: #fff;
+  --warn-bg: #fdf3d7; --warn-border: #ecd58a; --warn-text: #6b4e00;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -10,6 +11,7 @@
     --bg: #161615; --surface: #1f1f1d; --text: #ecebe6; --muted: #9a9993;
     --border: #33332f; --accent: #8aa8ff; --accent-soft: #263152; --mark: #5c4f12;
     --code-bg: #2a2a27; --on-accent: #10142a;
+    --warn-bg: #3a3114; --warn-border: #6b5a1f; --warn-text: #ecd58a;
     color-scheme: dark;
   }
 }
@@ -17,6 +19,7 @@
   --bg: #161615; --surface: #1f1f1d; --text: #ecebe6; --muted: #9a9993;
   --border: #33332f; --accent: #8aa8ff; --accent-soft: #263152; --mark: #5c4f12;
   --code-bg: #2a2a27; --on-accent: #10142a;
+  --warn-bg: #3a3114; --warn-border: #6b5a1f; --warn-text: #ecd58a;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -24,15 +27,19 @@ body {
   margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
-main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
-/* Title on the left, tool buttons (clear, debug, theme) on the right, above Find */
-header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; }
-h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
-.tools { display: flex; gap: 2px; flex-shrink: 0; }
+main { max-width: 1120px; margin: 0 auto; padding: 0 16px 64px; }
+/* Header, tabs and the search form stay on screen while the results scroll under them (app.js sets --chrome-h
+   to their height, for the Browse group headings and for the cards a citation scrolls to) */
+.chrome { position: sticky; top: 0; z-index: 10; padding: 24px 0 8px; background: var(--bg); }
+@media (max-width: 760px), (max-height: 520px) { .chrome { position: static; } }
+/* Title on the left, the Search / Browse switch in the middle, tool buttons (clear, debug, theme) on the right */
+header.top { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; margin: 0 0 12px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; white-space: nowrap; }
+.tools { display: flex; gap: 2px; flex-shrink: 0; justify-self: end; }
 h1 span { color: var(--muted); font-weight: 400; }
 /* Two columns: query + filters on the left, Search + clear on the right, so filters never pass under Search */
 form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
-form > button[type=submit] { align-self: stretch; }
+.actions { display: flex; gap: 8px; align-self: stretch; }
 input[type=search] {
   flex: 1; min-width: 0; padding: 6px 12px; font-size: 15px; color: var(--text);
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px; outline: none;
@@ -101,9 +108,9 @@ a.cite {
   color: var(--accent); background: var(--accent-soft); text-decoration: none;
 }
 a.cite:hover { background: var(--accent); color: var(--surface); }
-/* The card a citation [n] jumped to: outlined, and stopping 10px below the top of the window */
+/* The card a citation [n] jumped to: outlined, and stopping 10px below the sticky header */
 .result.cited { box-shadow: 0 0 0 2px var(--accent); }
-.result { scroll-margin-top: 10px; }
+.result { scroll-margin-top: calc(var(--chrome-h, 0px) + 10px); }
 @keyframes blink { to { visibility: hidden; } }
 @keyframes fade { from { opacity: .4; } to { opacity: 1; } }
 
@@ -216,16 +223,67 @@ details.result:not([open]) { padding-top: 10px; padding-bottom: 10px; }
 
 
 /* Find / Ask and the icon buttons lift on hover and press down on click */
-form > button[type=submit], .icon-btn {
+.actions > button, .icon-btn {
   transition: transform .12s ease, box-shadow .12s ease, background .12s ease, color .12s ease;
 }
-form > button[type=submit]:hover, .icon-btn:hover {
+.actions > button:hover, .icon-btn:hover {
   transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0, 0, 0, .25);
 }
-form > button[type=submit]:active, .icon-btn:active {
+.actions > button:active, .icon-btn:active {
   transform: translateY(1px) scale(.97); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition-duration: .05s;
 }
 @media (prefers-reduced-motion: reduce) {
-  form > button[type=submit], .icon-btn, #theme svg { transition: none; }
-  form > button[type=submit]:hover, .icon-btn:hover, form > button[type=submit]:active, .icon-btn:active { transform: none; }
+  .actions > button, .icon-btn, #theme svg { transition: none; }
+  .actions > button:hover, .icon-btn:hover, .actions > button:active, .icon-btn:active { transform: none; }
 }
+
+/* Search / Browse: a framed segmented control in the middle of the header */
+.view-switch {
+  display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
+}
+.view-switch button { padding: 3px 16px; font-size: 13px; color: var(--muted); background: none; border-radius: 999px; }
+.view-switch button:hover:not([aria-pressed="true"]) { color: var(--text); background: var(--code-bg); }
+.view-switch button[aria-pressed="true"] { color: var(--on-accent); background: var(--accent); }
+.view-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 760px) {
+  h1 { white-space: normal; }
+  header.top { grid-template-columns: 1fr auto; }
+  .view-switch { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
+}
+
+/* The parts of the page that belong to a view (app.js sets data-view on <body>) */
+body[data-view="browse"] .search-only, body:not([data-view="browse"]) .browse-only, body:not([data-view="browse"]) #browse,
+body[data-view="browse"] #status, body[data-view="browse"] #answer, body[data-view="browse"] #results { display: none; }
+body[data-view="browse"] #q, body[data-view="browse"] .filters { grid-column: 1 / -1; }
+#browse-count { white-space: nowrap; }
+
+/* Stop: next to Find while a request runs */
+button.secondary { color: var(--text); background: none; border: 1px solid var(--border); }
+button.secondary:hover { background: var(--surface); }
+
+/* A problem to notice: a failed request, a list that did not load */
+.banner {
+  margin: 14px 0 0; padding: 8px 12px; font-size: 13px; overflow-wrap: anywhere;
+  color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 8px;
+}
+.banner[hidden] { display: none; }
+
+/* Search view before the first search */
+.hint-empty { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 24px 16px; text-align: center; color: var(--muted); }
+.hint-empty a { color: var(--accent); }
+
+/* Browse: one line per article, grouped under a heading that sticks to the top while its group scrolls */
+#browse { margin-top: 4px; }
+.group-name {
+  position: sticky; top: var(--chrome-h, 0px); margin: 12px 0 0; padding: 8px 0 4px; font-size: 12px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+  background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.group ul { list-style: none; margin: 0; padding: 0; }
+.page { display: flex; align-items: baseline; gap: 16px; padding: 6px 8px; border-radius: 6px; }
+.page:hover { background: var(--surface); }
+.page-title { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--text); text-decoration: none; }
+a.page-title { color: var(--accent); }
+a.page-title:hover { text-decoration: underline; }
+.page-date { flex: none; font-size: 12px; color: var(--muted); }
+.group:first-child .group-name { margin-top: 0; }
