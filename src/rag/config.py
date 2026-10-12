@@ -56,3 +56,9 @@ LLM_CONTEXT_TOKENS = int(os.environ.get("RAG_LLM_CONTEXT_TOKENS", 4000))
 
 # Code corpus (Odoo addons): units longer than this (approximate tokens) are split before embedding.
 CODE_MAX_TOKENS = int(os.environ.get("RAG_CODE_MAX_TOKENS", 500))
+# Code answers: how much of the evidence goes into the prompt, and how many of the innermost frames of a traceback
+# are quoted in full (the other frames only as signature and docstring).
+CODE_CONTEXT_TOKENS = int(os.environ.get("RAG_CODE_CONTEXT_TOKENS", 5000))
+CODE_INNER_FRAMES = int(os.environ.get("RAG_CODE_INNER_FRAMES", 3))
+# Source code is not documentation: with the Claude provider, code answers are refused unless this is set to 1.
+CODE_EXTERNAL_LLM = os.environ.get("RAG_CODE_EXTERNAL_LLM", "0") == "1"

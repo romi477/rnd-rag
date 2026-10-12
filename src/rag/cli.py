@@ -360,20 +360,73 @@ def search(
         typer.echo("No results")
 
 
+def code_events(query, traceback_file, modules, client_version, with_docs, model, llm, show_prompt):
+    """Events of a code answer; with `show_prompt` a single delta holding the messages for the LLM."""
+    import sys
+
+    from rag.code_answer import build_code_context, build_code_messages, gather, stream_code_answer
+    from rag.code_graph import CodeGraph, graph_path
+    from rag.code_search import CodeSearcher
+    from rag.code_store import CodeStore
+    from rag.store import store_path
+    from rag.traceback import looks_like_traceback, semantic_query
+
+    graph = CodeGraph.load(graph_path())
+    store = CodeStore(store_path(model))
+    if not graph.modules or not store.exists():
+        fail("No code index; add modules with `rag module add` first")
+    text = traceback_file.read_text() if traceback_file else ""
+    if not text and looks_like_traceback(query):
+        text, query = query, ""
+    if not text and not query.strip():
+        fail("Give a question or --traceback FILE")
+    ev = gather(store, graph, query, text, CodeSearcher(make_embedder(model), store), modules or None, client_version)
+    pages = None
+    if with_docs:
+        search_text = semantic_query(ev.tb) if ev.tb else query
+        pages = open_searcher(model).search(search_text or query, k=config.LLM_CONTEXT_PAGES, rerank=True)
+    if show_prompt:
+        sources, context = build_code_context(ev.pieces)
+        yield {"type": "sources", "sources": [dict(vars(s)) for s in sources]}
+        for m in build_code_messages(query, ev, context):
+            yield {"type": "delta", "text": f"--- {m['role']} ---\n{m['content']}\n"}
+        return
+    yield from stream_code_answer(query, ev, llm, pages=pages)
+
+
 @app.command()
 def ask(
-    query: str,
+    query: str = typer.Argument("", help="The question (with --corpus code it may be empty when a traceback is given)"),
     mode: str = typer.Option("hybrid", help="hybrid | vector | fts", callback=check_mode),
     product: str | None = typer.Option(None, help="Filter by product, e.g. 'Direct Print'"),
     rerank: bool = typer.Option(True, help="Rerank and drop low-relevance sources (--no-rerank: off)"),
     llm_model: str = typer.Option(config.LLM_MODEL, help="LLM id (default: the one loaded in LM Studio, or claude-sonnet-5-5)"),
+    corpus: str = typer.Option("docs", help="docs (Confluence) | code (Odoo addons)", callback=check_corpus),
+    traceback_file: Path = typer.Option(None, "--traceback", help="Code corpus: file with a failed job's traceback"),
+    module: list[str] = typer.Option(None, help="Code corpus: search only these modules (repeatable)"),
+    client_version: str = typer.Option("", help="Code corpus: module version on the client's server"),
+    with_docs: bool = typer.Option(False, "--docs", help="Code corpus: also quote Confluence pages"),
+    model: str = typer.Option(config.EMBED_MODEL, help="Embedding model (selects the index)"),
+    show_prompt: bool = typer.Option(False, help="Code corpus: print the sources and the prompt, do not call the LLM"),
 ) -> None:
     """Answer a question with the LLM (RAG_LLM_PROVIDER), grounded in the search results."""
     from rag.answer import stream_answer
     from rag.llm import make_llm
 
-    hits = open_searcher().search(query, k=config.LLM_CONTEXT_PAGES, mode=mode, product=product, rerank=rerank)
-    for event in stream_answer(query, hits, make_llm(model=llm_model)):
+    if corpus == "code":
+        from rag.code_answer import external_llm_blocked
+
+        if not show_prompt and (reason := external_llm_blocked()):
+            fail(reason)
+        events = code_events(
+            query, traceback_file, module, client_version, with_docs, model, make_llm(model=llm_model), show_prompt
+        )
+    else:
+        if not query.strip():
+            fail("Give a question")
+        hits = open_searcher().search(query, k=config.LLM_CONTEXT_PAGES, mode=mode, product=product, rerank=rerank)
+        events = stream_answer(query, hits, make_llm(model=llm_model))
+    for event in events:
         if event["type"] == "delta":
             typer.echo(event["text"], nl=False)
         elif event["type"] == "error":
@@ -387,7 +440,10 @@ def ask(
                 typer.secho(f"\n[{event['model']}, {event['took_ms']} ms]", dim=True)
         elif event["type"] == "sources" and event["sources"]:
             for s in event["sources"]:
-                typer.secho(f"[{s['n']}] {s['title']}  {s['url']}", dim=True)
+                if s.get("kind") == "code":
+                    typer.secho(f"[{s['n']}] {s['module']}/{s['path']}:{s['line_start']}-{s['line_end']}  {s['label']}", dim=True)
+                else:
+                    typer.secho(f"[{s['n']}] {s['title']}  {s['url']}", dim=True)
             typer.echo()
 
 

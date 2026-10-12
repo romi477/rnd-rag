@@ -43,6 +43,7 @@ class Source:
     page_id: str
     title: str
     url: str
+    kind: str = "page"  # code answers number their code sources too: {"kind": "code", ...}
 
 
 def clean_text(text: str) -> str:
@@ -53,10 +54,12 @@ def build_context(
     pages: list[PageHit],
     max_pages: int = config.LLM_CONTEXT_PAGES,
     max_tokens: int = config.LLM_CONTEXT_TOKENS,
+    start: int = 1,
 ) -> tuple[list[Source], str]:
     """Number the top pages as sources and pack their matched chunks into a token budget.
 
-    Pages flagged `low_relevance` by the reranker are left out.
+    Pages flagged `low_relevance` by the reranker are left out. `start` is the number of the first source
+    (a code answer that also quotes the docs continues its own numbering).
     """
     sources: list[Source] = []
     blocks: list[str] = []
@@ -73,7 +76,7 @@ def build_context(
             used += size
         if not parts:
             break
-        n = len(sources) + 1
+        n = start + len(sources)
         sources.append(Source(n, page.page_id, page.title, page.url))
         path = " > ".join(page.breadcrumbs) or page.product
         blocks.append(f"[{n}] {page.title}\nPath: {path}\n\n" + "\n\n".join(parts))
@@ -99,25 +102,16 @@ def build_messages(query: str, context: str) -> list[dict]:
     ]
 
 
-def stream_answer(
-    query: str, pages: list[PageHit], llm: LLM, model: str | None = None
-) -> Iterator[dict]:
-    """Events: sources -> delta* -> done, or an error event instead of done.
+def stream_llm(messages: list[dict], llm: LLM, model: str | None = None) -> Iterator[dict]:
+    """Events after the sources: delta* -> done, or an error event instead of done.
 
     `model` overrides the client's default (the model loaded in LM Studio, or claude-sonnet-5-5). `done.truncated` is
     true when the answer was cut off by max_tokens.
     """
-    sources, context = build_context(pages)
-    yield {"type": "sources", "sources": [asdict(s) for s in sources]}
-    if not sources:
-        yield {"type": "delta", "text": NO_SOURCES}
-        yield {"type": "done", "model": None, "took_ms": 0}
-        return
-
     started, info, answered, first_token_ms = time.perf_counter(), {}, False, None
     try:
         model = model or llm.resolve_model()
-        for text in llm.stream_chat(build_messages(query, context), model=model, info=info):
+        for text in llm.stream_chat(messages, model=model, info=info):
             if first_token_ms is None:  # the first answer text, as the bench measures it
                 first_token_ms = round((time.perf_counter() - started) * 1000)
             answered = answered or bool(text.strip())
@@ -139,3 +133,16 @@ def stream_answer(
     if usage := token_usage(info.get("usage")):
         done["usage"] = usage
     yield done
+
+
+def stream_answer(
+    query: str, pages: list[PageHit], llm: LLM, model: str | None = None
+) -> Iterator[dict]:
+    """Events: sources -> delta* -> done, or an error event instead of done."""
+    sources, context = build_context(pages)
+    yield {"type": "sources", "sources": [asdict(s) for s in sources]}
+    if not sources:
+        yield {"type": "delta", "text": NO_SOURCES}
+        yield {"type": "done", "model": None, "took_ms": 0}
+        return
+    yield from stream_llm(build_messages(query, context), llm, model)

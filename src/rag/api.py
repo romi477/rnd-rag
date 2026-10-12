@@ -14,12 +14,19 @@ from dataclasses import asdict
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from rag import config
 from rag.answer import stream_answer
+from rag.code_answer import evidence_dict, external_llm_blocked, gather, stream_code_answer
+from rag.code_graph import CodeGraph, graph_path
+from rag.code_search import CodeSearcher
+from rag.code_store import CodeStore
 from rag.llm import LLMError, make_llm
 from rag.search import MODES, PageHit, Searcher
+from rag.store import store_path
+from rag.traceback import semantic_query
 
 state: dict = {}
 log = logging.getLogger(__name__)
@@ -40,6 +47,9 @@ async def lifespan(_: FastAPI):
     searcher = Searcher()
     state["searcher"] = searcher
     state["llm"] = make_llm()
+    # The code corpus is optional (experimental): without a code index its endpoints answer 503.
+    store = CodeStore(store_path(searcher.embedder.model_name))
+    state["code_searcher"] = CodeSearcher(searcher.embedder, store) if store.exists() else None
     threading.Thread(target=warm_up, args=(searcher,), daemon=True).start()
     yield
     state.clear()
@@ -105,6 +115,17 @@ def take_answer_slot() -> bool:
         return True
 
 
+def check_model(model: str | None) -> None:
+    if not model:
+        return
+    try:  # the Claude client reuses its model list for a few minutes: no request per answer
+        known = {m["id"] for m in state["llm"].list_models()}
+    except LLMError:
+        known = None  # server down: the answer stream reports it
+    if known is not None and model not in known:
+        raise HTTPException(400, f"Unknown LLM model {model!r}")
+
+
 @app.get("/api/answer")
 def answer(
     q: str = Query(..., min_length=1, max_length=500),
@@ -120,13 +141,7 @@ def answer(
     """
     if not take_answer_slot():
         raise HTTPException(429, f"Too many LLM answers: the limit is {config.ANSWERS_PER_HOUR} per hour (RAG_ANSWERS_PER_HOUR)")
-    if model:
-        try:  # the Claude client reuses its model list for a few minutes: no request per answer
-            known = {m["id"] for m in state["llm"].list_models()}
-        except LLMError:
-            known = None  # server down: the answer stream reports it
-        if known is not None and model not in known:
-            raise HTTPException(400, f"Unknown LLM model {model!r}")
+    check_model(model)
     hits, took_ms = run_search(q, k, mode, product, rerank)
 
     def events() -> Iterator[str]:
@@ -138,6 +153,91 @@ def answer(
                 yield json.dumps(event, ensure_ascii=False) + "\n"
         except Exception as exc:  # the headers are sent: report it in the stream instead of cutting it off
             log.exception("Answer failed")
+            yield json.dumps({"type": "error", "message": f"Internal error: {exc}"}) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
+
+
+def code_searcher() -> CodeSearcher:
+    searcher = state.get("code_searcher")
+    if searcher is None:
+        raise HTTPException(503, "No code index: add modules with `rag module add`")
+    return searcher
+
+
+@app.get("/api/code/modules")
+def code_modules() -> dict:
+    """Indexed Odoo addons: version, git ref they were read at, number of methods."""
+    code_searcher()
+    graph = CodeGraph.load(graph_path())
+    methods: dict[str, int] = {}
+    for m in graph.methods:
+        methods[m.module] = methods.get(m.module, 0) + 1
+    return {"modules": [
+        {"name": n, "version": graph.modules[n].version, "origin": graph.modules[n].origin,
+         "ref": graph.modules[n].ref, "methods": methods.get(n, 0)}
+        for n in graph.order()
+    ]}
+
+
+@app.get("/api/code/search")
+def code_search(
+    q: str = Query(..., min_length=1, max_length=500),
+    k: int = Query(10, ge=1, le=50),
+    mode: str = "hybrid",
+    module: list[str] = Query(default=[]),
+    kind: list[str] = Query(default=[]),
+) -> dict:
+    if mode not in MODES:
+        raise HTTPException(400, f"mode must be one of {MODES}")
+    searcher = code_searcher()
+    started = time.perf_counter()
+    with lock:
+        hits = searcher.search(q, k=k, mode=mode, modules=module or None, kinds=kind or None)
+    return {"query": q, "took_ms": round((time.perf_counter() - started) * 1000), "results": [asdict(h) for h in hits]}
+
+
+class CodeAnswerRequest(BaseModel):
+    question: str = Field("", max_length=500)
+    traceback: str = Field("", max_length=30000)  # a failed job's traceback as pasted
+    modules: list[str] = Field(default_factory=list, max_length=20)  # search only these modules
+    client_version: str = Field("", max_length=50)  # module version on the client's server
+    docs: bool = False  # also quote Confluence pages
+    model: str | None = Field(None, max_length=200)
+
+
+@app.post("/api/code/answer")
+def code_answer(req: CodeAnswerRequest) -> StreamingResponse:
+    """Explain a failed job from its traceback and/or a question, as NDJSON events:
+    results (evidence), sources, delta*, done | error."""
+    if not req.question.strip() and not req.traceback.strip():
+        raise HTTPException(400, "Give a question or a traceback")
+    if reason := external_llm_blocked():
+        raise HTTPException(403, reason)
+    searcher = code_searcher()
+    check_model(req.model)  # before the slot: a rejected request must not use up the hourly limit
+    if not take_answer_slot():
+        raise HTTPException(429, f"Too many LLM answers: the limit is {config.ANSWERS_PER_HOUR} per hour (RAG_ANSWERS_PER_HOUR)")
+    graph = CodeGraph.load(graph_path())
+    started = time.perf_counter()
+    with lock:
+        ev = gather(
+            searcher.store, graph, req.question, req.traceback, searcher, req.modules or None, req.client_version.strip()
+        )
+        pages = None
+        if req.docs:
+            query = semantic_query(ev.tb) if ev.tb else req.question
+            pages = state["searcher"].search(query or req.question, k=config.LLM_CONTEXT_PAGES, rerank=True)
+    took_ms = round((time.perf_counter() - started) * 1000)
+
+    def events() -> Iterator[str]:
+        first = {"type": "results", "took_ms": took_ms} | evidence_dict(ev)
+        yield json.dumps(first, ensure_ascii=False) + "\n"
+        try:  # the LLM runs outside the model lock
+            for event in stream_code_answer(req.question, ev, state["llm"], model=req.model or None, pages=pages):
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+        except Exception as exc:
+            log.exception("Code answer failed")
             yield json.dumps({"type": "error", "message": f"Internal error: {exc}"}) + "\n"
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
