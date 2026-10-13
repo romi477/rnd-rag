@@ -50,7 +50,8 @@ Keyboard: `/` focuses the question box (not while typing in a field), `F1` / `F2
 `Ctrl+Alt+Left` / `Ctrl+Alt+Right` step through them. The model and the answer language are read-only while
 "AI answer" is off.
 The Search / Browse switch in the header belongs to the tab: Browse lists every indexed article
-(`/api/pages`) grouped by product and section, narrowed by the product filter and by the words typed
+(`/api/pages`) grouped by product and section, newest first inside a group (by the date the page
+was created in Confluence, which the list shows; the tooltip adds the last update), narrowed by the product filter and by the words typed
 in the title filter; each view keeps its own text, and `?view=browse&filter=...` opens it directly.
 The eye button at the start of a row opens a preview: the article is fetched from the server when pressed (`/api/pages/{id}`)
 and shown in a window over the blurred page, with its headings, lists, tables, quotes and links; pictures show as
@@ -176,7 +177,7 @@ host names in `RAG_ALLOWED_HOSTS`, and sends no CORS headers, so other web pages
 | `GET /api/llm` | whether answer generation is available, the default and all chat models |
 | `GET /api/products` | the values for the `product` filter |
 | `GET /api/pages` | every indexed page with its Confluence link |
-| `GET /api/pages/{id}` | one article as the sync stored it (Markdown without the title, plus title, breadcrumbs, `updated`, link); 404 when the id is not synced |
+| `GET /api/pages/{id}` | one article as the sync stored it (Markdown without the title, plus title, breadcrumbs, `updated`, `created`, link); 404 when the id is not synced |
 
 `GET /api/search?q=...&k=10&mode=hybrid|vector|fts&product=...&rerank=false`
 
@@ -221,10 +222,10 @@ models with their load state (`{"available", "model", "models": [{"id", "loaded"
 
 ```json
 {"count": 242, "pages": [{"page_id": "...", "title": "...", "url": "https://...", "product": "...",
-                          "breadcrumbs": ["..."], "updated": "...", "labels": ["..."]}]}
+                          "breadcrumbs": ["..."], "updated": "...", "created": "...", "labels": ["..."]}]}
 ```
 
-`GET /api/pages/{id}` returns `{"page_id", "title", "url", "breadcrumbs", "product", "updated", "labels", "markdown"}` for the Browse
+`GET /api/pages/{id}` returns `{"page_id", "title", "url", "breadcrumbs", "product", "updated", "created", "labels", "markdown"}` for the Browse
 preview. It reads the synced copy in `raw-data/` (the server holds no Confluence token), so `updated` is the page's last change at
 the time of the last sync; the id is digits only.
 

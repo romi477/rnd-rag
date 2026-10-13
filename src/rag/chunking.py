@@ -47,6 +47,7 @@ class Page:
     breadcrumbs: list[str]
     labels: list[str]
     body: str
+    created: str = ""  # when the page was created in Confluence (sync metadata); not indexed
 
     def __post_init__(self) -> None:
         self.breadcrumbs = [c for c in self.breadcrumbs if c != ROOT_PAGE]
@@ -119,6 +120,7 @@ def load_page(meta_path: Path) -> Page:
         breadcrumbs=meta.get("breadcrumbs", []),
         labels=meta.get("labels", []),
         body=body,
+        created=meta.get("created") or "",
     )
 
 

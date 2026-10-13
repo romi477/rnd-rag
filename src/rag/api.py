@@ -319,10 +319,23 @@ def products() -> list[str]:
     return state["searcher"].products()
 
 
+def created_dates() -> dict[str, str]:
+    """page id -> when the page was created in Confluence, from the synced metadata (the index doesn't hold it)."""
+    dates = {}
+    for path in config.RAW_DIR.glob(f"{config.SPACE_KEY}/pages/*.json"):
+        try:
+            dates[path.stem] = json.loads(path.read_text()).get("created") or ""
+        except (OSError, ValueError):
+            continue  # a broken copy: the page just has no date
+    return dates
+
+
 @app.get("/api/pages")
 def pages() -> dict:
-    """Every indexed page with its Confluence link, sorted by product and path."""
-    pages = state["searcher"].pages()
+    """Every indexed page with its Confluence link, sorted by product and path; `created` is the page's
+    creation date in Confluence ("" when unknown)."""
+    created = created_dates()
+    pages = [p | {"created": created.get(p["page_id"], "")} for p in state["searcher"].pages()]
     return {"count": len(pages), "pages": pages}
 
 
@@ -342,7 +355,8 @@ def page(page_id: str = Path(..., pattern=r"^[0-9]{1,20}$")) -> dict:
         raise HTTPException(500, f"The synced copy of page {page_id} is unreadable: run the sync again") from exc
     return {
         "page_id": found.id, "title": found.title, "url": found.url, "breadcrumbs": found.breadcrumbs,
-        "product": found.product, "updated": found.updated, "labels": found.labels, "markdown": found.body,
+        "product": found.product, "updated": found.updated, "created": found.created, "labels": found.labels,
+        "markdown": found.body,
     }
 
 

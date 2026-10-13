@@ -58,11 +58,21 @@ def events(resp) -> list[dict]:
     return [json.loads(line) for line in resp.text.splitlines() if line]
 
 
-def test_search_and_products(client):
+def test_search_and_products(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "raw")  # nothing synced: no creation dates
     res = client.get("/api/search", params={"q": "install"})
     assert res.status_code == 200 and res.json()["results"][0]["page_id"] == "1"
     assert client.get("/api/products").json() == ["Printing"]
-    assert client.get("/api/pages").json() == {"count": 1, "pages": api.state["searcher"].pages()}
+    pages = [p | {"created": ""} for p in api.state["searcher"].pages()]
+    assert client.get("/api/pages").json() == {"count": 1, "pages": pages}
+
+
+def test_pages_carry_the_creation_date_from_the_synced_metadata(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(config, "SPACE_KEY", "demo")
+    write_synced_page(tmp_path / "raw", page_id="1", created="2024-05-06T07:08:09.000Z")
+    assert client.get("/api/pages").json()["pages"][0]["created"] == "2024-05-06T07:08:09.000Z"
+    assert client.get("/api/pages/1").json()["created"] == "2024-05-06T07:08:09.000Z"
 
 
 def test_bad_mode_is_400(client):
@@ -121,11 +131,14 @@ def test_unexpected_llm_failure_ends_the_stream_with_an_error(client):
     assert events(client.get("/api/answer", params={"q": "x"}))[-1] == {"type": "error", "message": "Internal error: boom"}
 
 
-def write_synced_page(raw_dir, page_id="123", body="Intro.\n\n[image: a.png]\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"):
+def write_synced_page(raw_dir, page_id="123", body="Intro.\n\n[image: a.png]\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n",
+                      created=None):
     pages = raw_dir / "demo" / "pages"
     pages.mkdir(parents=True, exist_ok=True)
     meta = {"id": page_id, "title": "Install", "space": "demo", "url": "https://x/1", "version": 3,
             "updated": "2026-01-02T03:04:05.000Z", "breadcrumbs": ["Home", "Printing"], "labels": ["setup"]}
+    if created:
+        meta["created"] = created
     (pages / f"{page_id}.json").write_text(json.dumps(meta))
     (pages / f"{page_id}.md").write_text(f"---\nid: \"{page_id}\"\ntitle: \"Install\"\n---\n# Install\n\n{body}")
 

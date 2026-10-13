@@ -758,17 +758,21 @@ function renderCode(data, tab) {
 // breadcrumbs). The server sends them sorted by product and path, so a group is a run of neighbours.
 function groupPages(list, product, filter) {
   const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
-  const groups = [];
+  const groups = new Map(); // group name -> {name, items}
   let count = 0;
   for (const p of list) {
     const title = p.title || "";
     if ((product && p.product !== product) || !words.every((w) => title.toLowerCase().includes(w))) continue;
     const name = (p.breadcrumbs?.length ? p.breadcrumbs.slice(0, 2) : [p.product]).join(" · ");
-    if (groups.at(-1)?.name !== name) groups.push({name, items: []});
-    groups.at(-1).items.push({p, title: highlight(title, words)});
+    if (!groups.has(name)) groups.set(name, {name, items: []});
+    groups.get(name).items.push({p, title: highlight(title, words)});
     count++;
   }
-  return {count, groups};
+  // Groups keep the server's order (product, path); inside a group the newest article comes first.
+  // ISO dates compare as text; a page without a creation date goes last.
+  const created = (p) => p.created || "";
+  for (const g of groups.values()) g.items.sort((a, b) => created(b.p).localeCompare(created(a.p)));
+  return {count, groups: [...groups.values()]};
 }
 
 const EYE_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -786,11 +790,14 @@ function renderBrowse(tab) {
       <h3 class="group-name">${escapeHtml(g.name)}</h3>
       <ul>${g.items.map(({p, title}) => {
         const href = safeUrl(p.url);
-        const date = p.updated ? new Date(p.updated).toLocaleDateString() : "";
+        const shown = p.created || p.updated; // the list is ordered by creation: show that date
+        const date = shown ? new Date(shown).toLocaleDateString() : "";
+        const dates = [p.created && `Created ${new Date(p.created).toLocaleDateString()}`,
+                       p.updated && `Updated ${new Date(p.updated).toLocaleDateString()}`].filter(Boolean).join(" · ");
         return `<li class="page">
           <button type="button" class="icon-btn preview-btn" data-preview="${escapeHtml(p.page_id)}" title="Preview the article" aria-label="Preview: ${escapeHtml(p.title)}">${EYE_ICON}</button>${href
           ? `<a class="page-title" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="Open in Confluence">${title}</a>`
-          : `<span class="page-title">${title}</span>`}${date ? `<span class="page-date">${escapeHtml(date)}</span>` : ""}</li>`;
+          : `<span class="page-title">${title}</span>`}${date ? `<span class="page-date" title="${escapeHtml(dates)}">${escapeHtml(date)}</span>` : ""}</li>`;
       }).join("")}</ul>
     </section>`).join("") : '<div class="empty">No article title matches. Clear the filter or choose another product.</div>';
 }
@@ -804,7 +811,8 @@ let previewTrigger = null; // the Preview button that opened the window
 function showPreviewHead(meta) {
   $("preview-title").textContent = meta?.title || "";
   $("preview-crumbs").textContent = (meta?.breadcrumbs || []).join(" › ") || meta?.product || "";
-  $("preview-meta").textContent = meta?.updated ? `Updated ${new Date(meta.updated).toLocaleDateString()}` : "";
+  $("preview-meta").textContent = [meta?.created && `Created ${new Date(meta.created).toLocaleDateString()}`,
+    meta?.updated && `Updated ${new Date(meta.updated).toLocaleDateString()}`].filter(Boolean).join(" · ");
   const href = safeUrl(meta?.url);
   $("preview-open").hidden = !href;
   if (href) $("preview-open").href = href;
