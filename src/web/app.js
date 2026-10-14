@@ -649,9 +649,8 @@ function renderAnswer(answer) {
   </details>`;
 }
 
-// Debug mode: what the answer cost in tokens, as the LLM server reported it.
-function usageHtml({usage, firstTokenMs}) {
-  if (!debug || (!usage && firstTokenMs == null)) return "";
+// Debug mode: what an LLM call cost in tokens, as the server reported it (an answer, an AI translation), and how long it took.
+function usageParts(usage, firstTokenMs) {
   const parts = [];
   if (usage) {
     parts.push(`prompt <b>${usage.prompt_tokens}</b> tokens`);
@@ -659,7 +658,21 @@ function usageHtml({usage, firstTokenMs}) {
     if (usage.reasoning_tokens) parts.push(`of them reasoning <b>${usage.reasoning_tokens}</b>`);
   }
   if (firstTokenMs != null) parts.push(`first token <b>${(firstTokenMs / 1000).toFixed(1)}</b> s`);
-  return `<div class="debug answer-debug">${parts.join(" · ")}</div>`;
+  return parts;
+}
+
+function usageHtml({usage, firstTokenMs}) {
+  const parts = debug ? usageParts(usage, firstTokenMs) : [];
+  return parts.length ? `<div class="debug answer-debug">${parts.join(" · ")}</div>` : "";
+}
+
+// The footer of the preview window after an AI translation: model, tokens, total time (debug mode only).
+function showPreviewFoot(done) {
+  const parts = done ? usageParts(done.usage, done.first_token_ms ?? null) : [];
+  if (done?.model) parts.unshift(escapeHtml(done.model));
+  if (done?.took_ms != null && parts.length) parts.splice(done.model ? 1 : 0, 0, `<b>${(done.took_ms / 1000).toFixed(1)}</b> s`);
+  $("preview-foot").innerHTML = parts.join(" · ");
+  $("preview-foot").hidden = !debug || !parts.length;
 }
 
 // A new token only re-renders the answer text, not the panel around it.
@@ -917,6 +930,7 @@ function showPreviewHead(meta, note = "") {
 
 // `lang`: translate the article into it with AI (empty: show the article as it is); `model`: the Claude model ("": the default).
 async function openPreview(id, lang = "", model = "") {
+  showPreviewFoot(null);
   showPreviewHead(pages?.find((p) => p.page_id === id)); // the list already knows the title, the text follows
   $("preview-body").innerHTML = `<div class="empty">${lang ? "Translating the article…" : "Loading the article…"}</div>`;
   const dialog = $("preview");
@@ -958,16 +972,16 @@ async function showTranslation(article, lang, model, controller) {
     $("preview-body").innerHTML = `<div class="article-text">${html}</div>` + (truncated
       ? '<div class="empty">The translation was cut off: it reached the token limit (RAG_TRANSLATE_MAX_TOKENS).</div>' : "");
   };
-  if (translations.has(key)) { const t = translations.get(key); show(t.title, t.text, t.truncated); return; }
+  if (translations.has(key)) { const t = translations.get(key); show(t.title, t.text, t.truncated); showPreviewFoot(t.done); return; }
   showPreviewHead(article, note);
   const res = await fetch(`/api/pages/${encodeURIComponent(article.page_id)}/translate?lang=${encodeURIComponent(lang)}${model ? `&model=${encodeURIComponent(model)}` : ""}`, {signal: controller.signal});
   if (!res.ok) throw await httpError(res);
-  let title = "", text = "", truncated = false, finished = false, timer = null;
+  let title = "", text = "", truncated = false, finished = false, timer = null, stats = null;
   const paint = () => { timer = null; if (text.trim()) show(title, text.replace(/^\n+/, "")); else if (title) showPreviewHead({...article, title}, note); };
   await readNdjson(res, (ev) => {
     if (ev.type === "title") title = ev.text;
     else if (ev.type === "delta") text += ev.text;
-    else if (ev.type === "done") { truncated = !!ev.truncated; finished = true; }
+    else if (ev.type === "done") { truncated = !!ev.truncated; finished = true; stats = ev; }
     else if (ev.type === "error") throw new Error(ev.message);
     if (ev.type !== "done" && !timer) timer = setTimeout(paint, 150); // a Markdown pass per token would be wasteful
   }).catch((err) => { clearTimeout(timer); if (text.trim()) show(title, text.replace(/^\n+/, "")); throw err; });
@@ -975,8 +989,9 @@ async function showTranslation(article, lang, model, controller) {
   if (!finished) throw new Error("the connection closed before the translation was complete");
   text = text.replace(/^\n+/, "");
   if (!text.trim()) { $("preview-body").innerHTML = '<div class="empty">The article has no text.</div>'; return; }
-  translations.set(key, {title, text, truncated});
+  translations.set(key, {title, text, truncated, done: stats});
   show(title, text, truncated);
+  showPreviewFoot(stats);
 }
 
 // The article list and the product list load once; a failed load is retried when they are needed again.

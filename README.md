@@ -64,7 +64,8 @@ The "AI translate" checkbox (Browse only, with a language select: Spanish, Germa
 the eye button into a translate button: the article is translated by the Claude API (Haiku, `RAG_TRANSLATE_MODEL`, whatever
 `RAG_LLM_PROVIDER` is) and the translation streams into the same window, marked "AI translation". Menu paths, settings, code and
 image markers stay as they are. The model selects (the answer model in Search and Code, the translation model in Browse) show only
-while the bug (Debug) button is on; the default of the answers is the server's model (Sonnet 5.5 with the Claude API), of the translation Haiku 5.5. The article text goes to Anthropic (needs `ANTHROPIC_API_KEY`; without it the checkbox is disabled),
+while the bug (Debug) button is on, and so does what an LLM call cost: under an answer (Search, Code) and in the footer of the translation
+window, the tokens in and out as the server reported them, the time and the time to the first token; the default of the answers is the server's model (Sonnet 5.5 with the Claude API), of the translation Haiku 5.5. The article text goes to Anthropic (needs `ANTHROPIC_API_KEY`; without it the checkbox is disabled),
 each translation counts toward `RAG_ANSWERS_PER_HOUR`, and a finished translation is kept by the page until it is reloaded.
 Cards are numbered by rank; with an LLM answer, the cards used as sources keep a filled badge with
 their source number. The bug icon turns on debug mode: under each card and fragment it shows how the

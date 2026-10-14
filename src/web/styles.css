@@ -367,6 +367,8 @@ body:has(.preview[open]) { overflow: hidden; }
 .preview-open:hover { text-decoration: underline; }
 .preview-open[hidden] { display: none; }
 .preview-bar .icon-btn { flex: none; margin-top: 2px; }
+.preview-foot { flex: none; margin: 0; padding: 6px 20px; border-top: 1px solid var(--border); opacity: .8; }
+.preview-foot[hidden] { display: none; }
 .preview-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 20px 28px; font-size: 15px; line-height: 1.55; overflow-wrap: anywhere; outline: none; }
 .article h1, .article h2, .article h3, .article h4 { line-height: 1.3; margin: 22px 0 6px; }
 .article h1 { font-size: 22px; } .article h2 { font-size: 19px; } .article h3 { font-size: 16.5px; } .article h4 { font-size: 15px; }
