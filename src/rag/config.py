@@ -54,6 +54,10 @@ CODE_LLM_MAX_TOKENS = int(os.environ.get("RAG_CODE_LLM_MAX_TOKENS", 2000))
 # At most this many /api/answer requests per hour (0: no limit): the API has no login, and with the Claude
 # API every answer is billed. Set a monthly spend limit in the Anthropic Console as well.
 ANSWERS_PER_HOUR = int(os.environ.get("RAG_ANSWERS_PER_HOUR", 200))
+# AI translation of an article (the Browse preview): always the Claude API, whatever RAG_LLM_PROVIDER is; the
+# article text goes to Anthropic, like the doc excerpts of an answer. The limit is multiplied by LANGUAGE_TOKEN_FACTOR.
+TRANSLATE_MODEL = os.environ.get("RAG_TRANSLATE_MODEL", "claude-haiku-5-5")
+TRANSLATE_MAX_TOKENS = int(os.environ.get("RAG_TRANSLATE_MAX_TOKENS", 6000))
 # How much of the search result goes into the prompt.
 LLM_CONTEXT_PAGES = int(os.environ.get("RAG_LLM_CONTEXT_PAGES", 5))
 LLM_CONTEXT_TOKENS = int(os.environ.get("RAG_LLM_CONTEXT_TOKENS", 4000))

@@ -171,6 +171,102 @@ def test_page_with_a_broken_synced_copy_is_a_500_with_a_hint(client, tmp_path, m
     assert res.status_code == 500 and "sync" in res.json()["detail"]
 
 
+class FakeTranslator(FakeLLM):
+    """The Haiku client: records the request, answers with a title line and a text."""
+
+    def stream_chat(self, messages, model=None, info=None, **kwargs):
+        self.messages, self.model = messages, model
+        yield "# Установка\n\nЗапустите установщик."
+        info["finish_reason"] = "stop"
+
+
+@pytest.fixture
+def translating(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "raw")
+    write_synced_page(tmp_path / "raw", body="Run the installer.\n")
+    api.state["translator"] = FakeTranslator()
+    return client
+
+
+def test_translation_streams_title_text_and_done_from_the_translator_model(translating):
+    res = translating.get("/api/pages/123/translate", params={"lang": "ru"})
+    got = events(res)
+    assert [e["type"] for e in got] == ["title", "delta", "done"]
+    assert got[0]["text"] == "Установка" and got[1]["text"] == "Запустите установщик."
+    translator = api.state["translator"]
+    assert translator.model == config.TRANSLATE_MODEL
+    assert "Run the installer." in translator.messages[1]["content"] and "Russian" in translator.messages[0]["content"]
+
+
+def test_translation_never_uses_the_answer_llm(translating):
+    assert translating.get("/api/pages/123/translate", params={"lang": "de"}).status_code == 200
+    assert api.state["translator"].messages and not hasattr(api.state["llm"], "messages")
+
+
+def test_translation_rejects_english_unknown_languages_and_a_missing_language(translating):
+    assert translating.get("/api/pages/123/translate", params={"lang": "en"}).status_code == 400
+    assert translating.get("/api/pages/123/translate", params={"lang": "xx"}).status_code == 400
+    assert translating.get("/api/pages/123/translate").status_code == 422
+
+
+def test_translation_of_an_unsynced_page_is_404_and_a_broken_copy_is_500(translating, tmp_path):
+    assert translating.get("/api/pages/999/translate", params={"lang": "ru"}).status_code == 404
+    (tmp_path / "raw" / "demo" / "pages" / "123.json").write_text("{not json")
+    assert translating.get("/api/pages/123/translate", params={"lang": "ru"}).status_code == 500
+
+
+def test_translations_use_the_hourly_limit_of_the_answers(translating, monkeypatch):
+    monkeypatch.setattr(api.config, "ANSWERS_PER_HOUR", 1)
+    codes = [translating.get("/api/pages/123/translate", params={"lang": "ru"}).status_code for _ in range(2)]
+    assert codes == [200, 429]
+
+
+def test_a_translation_without_an_api_key_ends_with_an_error_event(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "raw")
+    write_synced_page(tmp_path / "raw")
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    got = events(client.get("/api/pages/123/translate", params={"lang": "ru"}))
+    assert got[-1]["type"] == "error" and "ANTHROPIC_API_KEY" in got[-1]["message"]
+
+
+def test_the_translator_is_a_haiku_client_whatever_the_answer_provider_is(client):
+    translator = api.translator()
+    assert translator.model == config.TRANSLATE_MODEL == "claude-haiku-5-5"
+    assert api.translator() is translator  # one client, kept
+
+
+def test_translation_takes_a_model_the_translator_offers_and_rejects_others(translating):
+    assert translating.get("/api/pages/123/translate", params={"lang": "ru", "model": "nope"}).status_code == 400
+    assert translating.get("/api/pages/123/translate", params={"lang": "ru", "model": "m1"}).status_code == 200
+    assert api.state["translator"].model == "m1"
+
+
+def test_llm_status_lists_the_translation_models_and_the_default(client, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    api.state["translator"] = FakeTranslator(models=("claude-haiku-5-5", "claude-sonnet-5-5"))
+    status = client.get("/api/llm").json()
+    assert status["translate_models"] == ["claude-haiku-5-5", "claude-sonnet-5-5"]
+    assert status["translate_model"] == config.TRANSLATE_MODEL
+
+
+def test_llm_status_has_no_translation_models_without_a_key_or_when_the_list_fails(client, monkeypatch):
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    assert client.get("/api/llm").json()["translate_models"] == []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    api.state["translator"] = FakeTranslator(down=True)
+    assert client.get("/api/llm").json()["translate_models"] == [config.TRANSLATE_MODEL]
+
+
+def test_llm_status_says_whether_translation_can_run(client, monkeypatch):
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    assert client.get("/api/llm").json()["translate"] is False
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    assert client.get("/api/llm").json()["translate"] is True
+
+
 def basic(user: str, token: str) -> dict:
     import base64
 

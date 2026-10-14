@@ -154,6 +154,8 @@ a.cite:hover { background: var(--accent); color: var(--surface); }
   width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: 0 0 auto;
   animation: fade .8s ease-in-out infinite alternate;
 }
+/* The model selects are for debugging: they show with the Debug button on (app.js sets .debug-on on <body>) */
+body:not(.debug-on) .debug-only { display: none; }
 .llm-group { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .filters label { white-space: nowrap; }
 /* A faint pipe between the filter sections (product | mode | rerank | LLM), centred in the gap.

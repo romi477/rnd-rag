@@ -56,6 +56,12 @@ in the title filter; each view keeps its own text, and `?view=browse&filter=...`
 The eye button at the start of a row opens a preview: the article is fetched from the server when pressed (`/api/pages/{id}`)
 and shown in a window over the blurred page, with its headings, lists, tables, quotes and links; pictures show as
 placeholders. Esc, the cross or a click outside closes it; "Open in Confluence" goes to the original.
+The "AI translate" checkbox (Browse only, with a language select: Spanish, German, Polish, Russian; the articles are English) turns
+the eye button into a translate button: the article is translated by the Claude API (Haiku, `RAG_TRANSLATE_MODEL`, whatever
+`RAG_LLM_PROVIDER` is) and the translation streams into the same window, marked "AI translation". Menu paths, settings, code and
+image markers stay as they are. The model selects (the answer model in Search and Code, the translation model in Browse) show only
+while the bug (Debug) button is on; the default of the answers is the server's model (Sonnet 5.5 with the Claude API), of the translation Haiku 5.5. The article text goes to Anthropic (needs `ANTHROPIC_API_KEY`; without it the checkbox is disabled),
+each translation counts toward `RAG_ANSWERS_PER_HOUR`, and a finished translation is kept by the page until it is reloaded.
 Cards are numbered by rank; with an LLM answer, the cards used as sources keep a filled badge with
 their source number. The bug icon turns on debug mode: under each card and fragment it shows how the
 fragment was scored (`vector #rank cosine · bm25 #rank score · rrf · retrieval #rank · rerank`); under an
@@ -149,7 +155,8 @@ Tuning (env, see `src/rag/config.py`):
 | `RAG_LLM_MODEL` | empty: the model loaded in LM Studio; with the Claude API, `claude-sonnet-5-5` |
 | `RAG_LLM_REASONING` | `none`: as little "thinking" as the model allows, for faster answers (LM Studio: sent as `reasoning_effort`; Claude Sonnet 5.5: `thinking: between_tools`, other Claude models: effort `low`); Claude also takes `low` / `medium` / `high` as the effort level; empty: the server default |
 | `RAG_LLM_TEMPERATURE` / `RAG_LLM_MAX_TOKENS` | `0.2` / `1000` (temperature is not sent to Claude: current models take only the default) |
-| `RAG_ANSWERS_PER_HOUR` | `200`: at most this many `/api/answer` requests per hour, then 429 (0: no limit). Claude answers are billed: set `RAG_API_TOKEN` when others can reach the server, and also set a monthly spend limit in the Anthropic Console |
+| `RAG_TRANSLATE_MODEL` / `RAG_TRANSLATE_MAX_TOKENS` | `claude-haiku-5-5` / `6000` (x1.3 es, x1.4 de, x1.7 pl, x2 ru): the Claude model and the output limit of the Browse "AI translate"; the key is `ANTHROPIC_API_KEY` whatever the answer provider is |
+| `RAG_ANSWERS_PER_HOUR` | `200`: at most this many `/api/answer` and translation requests per hour, then 429 (0: no limit). Claude answers are billed: set `RAG_API_TOKEN` when others can reach the server, and also set a monthly spend limit in the Anthropic Console |
 | `RAG_LLM_CONTEXT_PAGES` / `RAG_LLM_CONTEXT_TOKENS` | `5` / `4000`: how much of the search result goes into the prompt |
 | `RAG_API_TOKEN` | empty: no login. A token that the UI and every endpoint then require, as the password of HTTP Basic auth (the user name is ignored): the browser asks once, `curl -u :TOKEN`, `Authorization: Basic base64(":TOKEN")` |
 | `RAG_ALLOWED_HOSTS` | `127.0.0.1,localhost`: host names the server answers to (see below) |
@@ -228,6 +235,12 @@ models with their load state (`{"available", "model", "models": [{"id", "loaded"
 `GET /api/pages/{id}` returns `{"page_id", "title", "url", "breadcrumbs", "product", "updated", "created", "labels", "markdown"}` for the Browse
 preview. It reads the synced copy in `raw-data/` (the server holds no Confluence token), so `updated` is the page's last change at
 the time of the last sync; the id is digits only.
+
+`GET /api/pages/{id}/translate?lang=ru` streams the article translated by the Claude API (NDJSON, like `/api/answer`): an optional
+`{"type": "title", "text"}` (the translated title), `{"type": "delta", "text"}` events with the Markdown, then `{"type": "done", "model",
+"took_ms", "truncated"}` or `{"type": "error", "message"}`. `lang` is required: `es`, `de`, `pl` or `ru` (`en` is a 400: the articles are
+English). The optional `model` must be one of `translate_models` of `GET /api/llm`, which also has `translate: true` when the Claude key is set
+and `translate_model` (the default).
 
 ## Code corpus (experimental, branch `feat/code-search`)
 

@@ -25,6 +25,7 @@ const POSITIONS = ["search", "browse", "code"];
 const positionOf = (tab) => (tab.mode === "code" ? "code" : tab.view);
 const TRACE_MAX = 30000; // = the API limit
 const SEARCH_PLACEHOLDER = $("q").placeholder;
+const TRANSLATE_HELP = $("translate-label").title; // the hover help from index.html
 const DOCS_SUBTITLE = $("subtitle").textContent;
 const CODE_PLACEHOLDER = "Describe the problem or paste the error… (a traceback can be added with the button)";
 const CODE_DEFAULTS = {trace: "", module: "", version: "", docs: false};
@@ -55,7 +56,7 @@ const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2
 // view: "search" or "browse" (the title filter of the article list is `filter`, kept apart from the query `q`).
 function newTab(init = {}) {
   return {id: newId(), mode: "docs", view: "search", q: "", filter: "", product: "", llm: false, model: "",
-          ...CODE_DEFAULTS, tracePanel: "closed", lang: "", data: null, answer: null, status: "", error: "", busy: false, ...init};
+          ...CODE_DEFAULTS, tracePanel: "closed", lang: "", translate: false, tlang: "", tmodel: "", data: null, answer: null, status: "", error: "", busy: false, ...init};
 }
 
 const activeTab = () => tabs.find((t) => t.id === activeId);
@@ -123,7 +124,7 @@ function sanitize(t) {
   delete tab.rerank; // a setting of older versions (their search `mode` is replaced below: it is not "docs" / "code")
   if (!MODES.includes(tab.mode)) tab.mode = "docs"; // tabs saved before the Code mode are Docs tabs
   if (!VIEWS.includes(tab.view) || tab.mode === "code") tab.view = "search";
-  for (const k of ["q", "filter", "product", "model", "error", "trace", "module", "version", "lang"]) if (typeof tab[k] !== "string") tab[k] = "";
+  for (const k of ["q", "filter", "product", "model", "error", "trace", "module", "version", "lang", "tlang", "tmodel"]) if (typeof tab[k] !== "string") tab[k] = "";
   tab.q = tab.q.slice(0, 500);
   tab.filter = tab.filter.slice(0, 500);
   tab.trace = tab.trace.slice(0, TRACE_MAX);
@@ -133,6 +134,9 @@ function sanitize(t) {
   tab.llm = !!tab.llm;
   tab.docs = SHOW_CODE_DOCS && !!tab.docs; // a saved tab cannot keep a hidden option on
   tab.lang = tab.lang.slice(0, 10);
+  tab.tlang = tab.tlang.slice(0, 10);
+  tab.tmodel = tab.tmodel.slice(0, 200);
+  tab.translate = !!tab.translate;
   if (tab.ran) tab.ran = {...SETTING_DEFAULTS, ...tab.ran}; // else the new settings would look "changed"
   return tab;
 }
@@ -154,6 +158,9 @@ function readForm(tab) {
   if (llmInfo.checked) tab.model = $("model").value;
   // "" in a tab follows the server's default: it becomes a language only when the user picks another one.
   if (languagesLoaded && $("lang").value !== effectiveLang(tab)) tab.lang = $("lang").value;
+  tab.translate = $("translate").checked;
+  if (llmInfo.checked) tab.tmodel = $("tmodel").value;
+  if (languagesLoaded && $("tlang").value && $("tlang").value !== effectiveTlang(tab)) tab.tlang = $("tlang").value;
 }
 
 const effectiveLang = (tab) => (languages.some((l) => l.code === tab.lang) ? tab.lang : defaultLang);
@@ -162,8 +169,20 @@ const effectiveLang = (tab) => (languages.some((l) => l.code === tab.lang) ? tab
 const langParam = (tab) => (languagesLoaded ? effectiveLang(tab) : "");
 
 function fillLanguages(tab) {
-  $("lang").innerHTML = languages.map((l) => `<option value="${escapeHtml(l.code)}" title="${escapeHtml(l.native)}">${escapeHtml(l.code.toUpperCase())}</option>`).join("");
+  const option = (l) => `<option value="${escapeHtml(l.code)}" title="${escapeHtml(l.native)}">${escapeHtml(l.code.toUpperCase())}</option>`;
+  $("lang").innerHTML = languages.map(option).join("");
   $("lang").value = tab ? effectiveLang(tab) : defaultLang;
+  $("tlang").innerHTML = translateLangs().map(option).join("");
+  if (tab) $("tlang").value = effectiveTlang(tab);
+}
+
+// The articles are English: they are translated into the other languages only.
+const translateLangs = () => languages.filter((l) => l.code !== "en");
+// The language chosen for the translation, else the one of the AI answer (when it is not English), else the first.
+function effectiveTlang(tab) {
+  const list = translateLangs();
+  for (const code of [tab.tlang, effectiveLang(tab)]) if (list.some((l) => l.code === code)) return code;
+  return list[0]?.code || "";
 }
 
 // Options of the product select. Until the list is loaded (or when it failed to load) the tab's own product
@@ -248,6 +267,10 @@ function writeForm(tab) {
   $("llm").checked = tab.llm;
   $("model").value = hasOption("model", tab.model) ? tab.model : "";
   $("lang").value = effectiveLang(tab);
+  $("translate").checked = tab.translate;
+  $("tlang").value = effectiveTlang(tab);
+  if (llmInfo.checked && !hasOption("tmodel", tab.tmodel)) tab.tmodel = "";
+  $("tmodel").value = hasOption("tmodel", tab.tmodel) ? tab.tmodel : "";
   updateLlmControls();
   for (const pos of POSITIONS) $(`pos-${pos}`).setAttribute("aria-pressed", String(positionOf(tab) === pos));
   updateSubmitLabel(tab);
@@ -269,7 +292,14 @@ const submitLabel = (tab) => {
 function updateLlmControls() {
   $("llm").disabled = !llmInfo.available;
   $("model").disabled = $("lang").disabled = !(llmInfo.available && $("llm").checked);
+  // The translation always goes to the Claude API (Haiku), so it needs the key, not the LLM server of the answers.
+  $("translate").disabled = !llmInfo.translate;
+  $("tlang").disabled = $("tmodel").disabled = !(llmInfo.translate && $("translate").checked);
+  $("translate-label").title = TRANSLATE_HELP + (llmInfo.checked && !llmInfo.translate ? "\n\nUnavailable: ANTHROPIC_API_KEY is not set on the server." : "");
 }
+
+// Whether a Browse row's button translates (the tab has AI translate on and the server can do it).
+const translating = (tab) => tab.translate && !!llmInfo.translate && !!effectiveTlang(tab);
 
 // The switch says what will appear: an answer in Search / Browse, an explanation of the error in Code.
 const llmLabel = (tab) => (tab.mode === "code" ? "AI explanation" : "AI answer");
@@ -407,6 +437,8 @@ function setDebug(on) {
   debug = on;
   try { localStorage.setItem(DEBUG_KEY, on ? "1" : "0"); } catch { /* storage blocked */ }
   $("debug").setAttribute("aria-pressed", String(on));
+  document.body.classList.toggle("debug-on", on);
+  markFilterRows(); // the model selects came or went
   renderContent(activeTab());
 }
 
@@ -777,6 +809,8 @@ function groupPages(list, product, filter) {
 
 const EYE_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
 
+const TRANSLATE_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
+
 function renderBrowse(tab) {
   if (!pages) {
     $("browse-count").textContent = "";
@@ -784,6 +818,7 @@ function renderBrowse(tab) {
     return;
   }
   const {count, groups} = groupPages(pages, tab.product, tab.filter);
+  const translate = translating(tab);
   $("browse-count").textContent = `${count} article${count === 1 ? "" : "s"}`;
   $("browse").innerHTML = count ? groups.map((g) => `
     <section class="group">
@@ -795,7 +830,7 @@ function renderBrowse(tab) {
         const dates = [p.created && `Created ${new Date(p.created).toLocaleDateString()}`,
                        p.updated && `Updated ${new Date(p.updated).toLocaleDateString()}`].filter(Boolean).join(" · ");
         return `<li class="page">
-          <button type="button" class="icon-btn preview-btn" data-preview="${escapeHtml(p.page_id)}" title="Preview the article" aria-label="Preview: ${escapeHtml(p.title)}">${EYE_ICON}</button>${href
+          <button type="button" class="icon-btn preview-btn" data-preview="${escapeHtml(p.page_id)}" title="${translate ? "Translate the article with AI" : "Preview the article"}" aria-label="${translate ? "Translate" : "Preview"}: ${escapeHtml(p.title)}">${translate ? TRANSLATE_ICON : EYE_ICON}</button>${href
           ? `<a class="page-title" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="Open in Confluence">${title}</a>`
           : `<span class="page-title">${title}</span>`}${date ? `<span class="page-date" title="${escapeHtml(dates)}">${escapeHtml(date)}</span>` : ""}</li>`;
       }).join("")}</ul>
@@ -805,22 +840,25 @@ function renderBrowse(tab) {
 // --- Browse preview: the article in a window over the blurred page ----------------------------------
 
 const articles = new Map(); // page_id -> the article as /api/pages/{id} returned it: fetched once
+const translations = new Map(); // "page_id:lang" -> {title, text} of a finished AI translation: asked for once
 let previewController = null;
 let previewTrigger = null; // the Preview button that opened the window
 
-function showPreviewHead(meta) {
+// `note` goes after the dates (the language of an AI translation).
+function showPreviewHead(meta, note = "") {
   $("preview-title").textContent = meta?.title || "";
   $("preview-crumbs").textContent = (meta?.breadcrumbs || []).join(" › ") || meta?.product || "";
   $("preview-meta").textContent = [meta?.created && `Created ${new Date(meta.created).toLocaleDateString()}`,
-    meta?.updated && `Updated ${new Date(meta.updated).toLocaleDateString()}`].filter(Boolean).join(" · ");
+    meta?.updated && `Updated ${new Date(meta.updated).toLocaleDateString()}`, note].filter(Boolean).join(" · ");
   const href = safeUrl(meta?.url);
   $("preview-open").hidden = !href;
   if (href) $("preview-open").href = href;
 }
 
-async function openPreview(id) {
+// `lang`: translate the article into it with AI (empty: show the article as it is); `model`: the Claude model ("": the default).
+async function openPreview(id, lang = "", model = "") {
   showPreviewHead(pages?.find((p) => p.page_id === id)); // the list already knows the title, the text follows
-  $("preview-body").innerHTML = '<div class="empty">Loading the article…</div>';
+  $("preview-body").innerHTML = `<div class="empty">${lang ? "Translating the article…" : "Loading the article…"}</div>`;
   const dialog = $("preview");
   if (!dialog.open) dialog.showModal();
   $("preview-body").scrollTop = 0;
@@ -834,13 +872,51 @@ async function openPreview(id) {
       articles.set(id, await res.json());
     }
     const article = articles.get(id);
-    showPreviewHead(article);
-    $("preview-body").innerHTML = renderMarkdown(article.markdown, [], true) || '<div class="empty">The article has no text.</div>';
+    if (lang) await showTranslation(article, lang, model, controller);
+    else {
+      showPreviewHead(article);
+      $("preview-body").innerHTML = renderMarkdown(article.markdown, [], true) || '<div class="empty">The article has no text.</div>';
+    }
   } catch (err) {
     if (controller.signal.aborted) return; // closed meanwhile
-    $("preview-body").innerHTML = `<div class="empty">Could not load the article: ${escapeHtml(err.message)}
-      <button type="button" class="secondary" data-preview-retry="${escapeHtml(id)}">Retry</button></div>`;
+    const body = $("preview-body");
+    const failed = `<div class="empty">Could not ${lang ? "translate" : "load"} the article: ${escapeHtml(err.message)}
+      <button type="button" class="secondary" data-preview-retry="${escapeHtml(id)}" data-lang="${escapeHtml(lang)}" data-model="${escapeHtml(model)}">Retry</button></div>`;
+    if (body.querySelector(".article-text")) body.insertAdjacentHTML("beforeend", failed); // keep the part that came
+    else body.innerHTML = failed;
   }
+}
+
+// The translation as it streams in: the title first, then the text, shown as Markdown like the original.
+async function showTranslation(article, lang, model, controller) {
+  const name = languages.find((l) => l.code === lang)?.native || lang.toUpperCase();
+  const note = `AI translation · ${name}` + (debug ? ` · ${model || llmInfo.translate_model || ""}` : ""); // the model: debug only
+  const key = `${article.page_id}:${lang}:${model}`;
+  const show = (title, text, truncated = false) => {
+    showPreviewHead({...article, title: title || article.title}, note);
+    const html = renderMarkdown(text, [], true);
+    $("preview-body").innerHTML = `<div class="article-text">${html}</div>` + (truncated
+      ? '<div class="empty">The translation was cut off: it reached the token limit (RAG_TRANSLATE_MAX_TOKENS).</div>' : "");
+  };
+  if (translations.has(key)) { const t = translations.get(key); show(t.title, t.text, t.truncated); return; }
+  showPreviewHead(article, note);
+  const res = await fetch(`/api/pages/${encodeURIComponent(article.page_id)}/translate?lang=${encodeURIComponent(lang)}${model ? `&model=${encodeURIComponent(model)}` : ""}`, {signal: controller.signal});
+  if (!res.ok) throw await httpError(res);
+  let title = "", text = "", truncated = false, finished = false, timer = null;
+  const paint = () => { timer = null; if (text.trim()) show(title, text.replace(/^\n+/, "")); else if (title) showPreviewHead({...article, title}, note); };
+  await readNdjson(res, (ev) => {
+    if (ev.type === "title") title = ev.text;
+    else if (ev.type === "delta") text += ev.text;
+    else if (ev.type === "done") { truncated = !!ev.truncated; finished = true; }
+    else if (ev.type === "error") throw new Error(ev.message);
+    if (ev.type !== "done" && !timer) timer = setTimeout(paint, 150); // a Markdown pass per token would be wasteful
+  }).catch((err) => { clearTimeout(timer); if (text.trim()) show(title, text.replace(/^\n+/, "")); throw err; });
+  clearTimeout(timer);
+  if (!finished) throw new Error("the connection closed before the translation was complete");
+  text = text.replace(/^\n+/, "");
+  if (!text.trim()) { $("preview-body").innerHTML = '<div class="empty">The article has no text.</div>'; return; }
+  translations.set(key, {title, text, truncated});
+  show(title, text, truncated);
 }
 
 // The article list and the product list load once; a failed load is retried when they are needed again.
@@ -1186,7 +1262,12 @@ async function refreshLlmStatus() {
   $("model").innerHTML = `<option value="">Default (${escapeHtml(llmInfo.model || "none")})</option>` +
     llmInfo.models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${m.loaded === false ? " (not loaded)" : ""}</option>`).join("");
   $("model").value = [...$("model").options].some((o) => o.value === selected) ? selected : "";
+  const chosen = activeTab()?.tmodel || "";
+  $("tmodel").innerHTML = `<option value="">Default (${escapeHtml(llmInfo.translate_model || "none")})</option>` +
+    (llmInfo.translate_models || []).map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  $("tmodel").value = hasOption("tmodel", chosen) ? chosen : "";
   updateLlmControls();
+  if (activeTab()?.view === "browse") renderBrowse(activeTab()); // the Preview buttons may become Translate buttons
   // With the Claude API the question and the doc excerpts leave this machine: say so in the switch's tooltip.
   const external = llmInfo.provider === "anthropic";
   $("llm-label").title = LLM_HELP +
@@ -1207,7 +1288,10 @@ async function loadLanguages() {
     languagesLoaded = true;
   } catch { return; } // keep English only: the answer then uses the server's default
   const tab = activeTab();
-  if (tab) fillLanguages(tab);
+  if (!tab) return;
+  fillLanguages(tab);
+  updateLlmControls(); // the translation language list was empty until now
+  if (tab.view === "browse") renderBrowse(tab);
 }
 
 // --- init ---------------------------------------------------------------------
@@ -1248,6 +1332,7 @@ async function init() {
   const runNow = openFromUrl();
   if (!tabs.length) { tabs.push(newTab()); activeId = tabs[0].id; }
   $("debug").setAttribute("aria-pressed", String(debug));
+  document.body.classList.toggle("debug-on", debug);
   applyTheme();
   renderView();
   markFilterRows();
@@ -1298,11 +1383,13 @@ $("browse").addEventListener("click", (e) => {
   const button = e.target.closest("[data-preview]");
   if (!button) return;
   previewTrigger = button; // focus goes back to it when the window closes (Safari does not focus a clicked button)
-  openPreview(button.dataset.preview);
+  const tab = activeTab();
+  const translate = tab && translating(tab);
+  openPreview(button.dataset.preview, translate ? effectiveTlang(tab) : "", translate ? tab.tmodel : "");
 });
 $("preview-body").addEventListener("click", (e) => {
   const retry = e.target.closest("[data-preview-retry]");
-  if (retry) openPreview(retry.dataset.previewRetry);
+  if (retry) openPreview(retry.dataset.previewRetry, retry.dataset.lang, retry.dataset.model);
 });
 $("preview-close").addEventListener("click", () => $("preview").close());
 $("preview").addEventListener("click", (e) => { if (e.target === $("preview")) $("preview").close(); }); // the blurred backdrop
@@ -1340,7 +1427,7 @@ $("theme").addEventListener("click", toggleTheme);
 }
 systemDark.addEventListener("change", () => { if (!savedTheme()) applyTheme(); });
 window.addEventListener("storage", (e) => { if (e.key === THEME_KEY) applyTheme(); });
-["product", "llm", "model", "lang", "code-module", "code-docs"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
+["product", "llm", "model", "lang", "translate", "tlang", "tmodel", "code-module", "code-docs"].forEach((id) => $(id).addEventListener("change", onSettingsChange));
 $("client-version").addEventListener("input", onSettingsChange);
 $("tabs").addEventListener("click", (e) => {
   const close = e.target.closest("[data-close]");

@@ -221,6 +221,11 @@ def as_llm_error(exc: Exception) -> LLMError:
     return LLMError(f"Claude API: {exc}")
 
 
+def claude_key_set() -> bool:
+    """Whether the Claude API can be called: without a key the SDK only fails on the first request, with a TypeError."""
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
 class ClaudeClient:
     """The Claude API through the official SDK, with the same interface as LLMClient.
 
@@ -241,7 +246,7 @@ class ClaudeClient:
     @cached_property
     def client(self) -> anthropic.Anthropic:
         # Checked here: without a key the SDK only fails on the first request, with a TypeError.
-        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        if not claude_key_set():
             raise LLMError("ANTHROPIC_API_KEY is not set: add it to .env (RAG_LLM_PROVIDER=anthropic)")
         return anthropic.Anthropic(timeout=self.timeout)
 

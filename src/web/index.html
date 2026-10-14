@@ -78,11 +78,17 @@
       <label class="code-only" title="Module version on the client's server: a different version from the indexed one is flagged, as line numbers may not match.">Client version <input id="client-version" type="text" size="10" maxlength="50" placeholder="19.0.2.3.0" autocomplete="off"></label>
       <label class="code-only" title="Also quote the Confluence pages that match the error message."><input type="checkbox" id="code-docs"> Add documentation</label>
       <span id="browse-count" class="browse-only"></span>
+      <!-- Browse: the Preview button of each article translates it with AI while this is on. -->
+      <span class="llm-group browse-only">
+        <label id="translate-label" title="Translate an article into another language with AI: the Preview button then shows the translation. The article text is sent to the Claude API."><input type="checkbox" id="translate"> AI translate</label>
+        <select id="tlang" aria-label="Translate into" title="The language of the translation (turn on AI translate to change it). Menu paths, settings and code stay as they are."></select>
+        <select id="tmodel" class="debug-only" aria-label="Translation model" title="The Claude model that translates (turn on AI translate to change it). Default: RAG_TRANSLATE_MODEL on the server."><option value="">Default</option></select>
+      </span>
       <span class="llm-group search-only">
         <label id="llm-label" title="Also write an answer with AI from the top pages (local LM Studio or the Claude API, set on the server), citing them as [n]. Check the answer against the cited sources."><input type="checkbox" id="llm"> <span id="llm-text">AI answer</span></label>
-        <select id="model" aria-label="LLM model" title="The LLM that writes the answer (turn on AI answer to change it). Default: the model set on the server (in LM Studio: the loaded one). Models marked (not loaded) are loaded by LM Studio on first use, which takes a while."><option value="">Default</option></select>
+        <select id="model" class="debug-only" aria-label="LLM model" title="The LLM that writes the answer (turn on AI answer to change it). Default: the model set on the server (in LM Studio: the loaded one). Models marked (not loaded) are loaded by LM Studio on first use, which takes a while."><option value="">Default</option></select>
         <select id="lang" aria-label="Answer language" title="The language of the LLM answer (turn on AI answer to change it). The sources stay in English; menu paths, settings and code are quoted as they are."><option value="en">English</option></select>
-        <button type="button" id="refresh-models" class="icon-btn" title="Refresh the model list (and, with LM Studio, which models are loaded)" aria-label="Refresh the model list">
+        <button type="button" id="refresh-models" class="icon-btn debug-only" title="Refresh the model list (and, with LM Studio, which models are loaded)" aria-label="Refresh the model list">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>
           </svg>

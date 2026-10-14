@@ -27,9 +27,10 @@ from rag.code_graph import CodeGraph, graph_path
 from rag.code_lookup import sync_problems
 from rag.code_search import CodeSearcher
 from rag.code_store import CodeStore
-from rag.llm import LLMError, make_llm
+from rag.llm import ClaudeClient, LLMError, claude_key_set, make_llm
 from rag.search import MODES, PageHit, Searcher
 from rag.store import store_path
+from rag.translate import check_target, stream_translation
 from rag.traceback import semantic_query
 
 state: dict = {}
@@ -148,11 +149,12 @@ def take_answer_slot() -> bool:
         return True
 
 
-def check_model(model: str | None) -> None:
+def check_model(model: str | None, llm=None) -> None:
+    """400 for a model the LLM client does not offer (`llm`: the answer client unless another is given)."""
     if not model:
         return
     try:  # the Claude client reuses its model list for a few minutes: no request per answer
-        known = {m["id"] for m in state["llm"].list_models()}
+        known = {m["id"] for m in (llm or state["llm"]).list_models()}
     except LLMError:
         known = None  # server down: the answer stream reports it
     if known is not None and model not in known:
@@ -310,8 +312,22 @@ def code_answer(req: CodeAnswerRequest) -> StreamingResponse:
 @app.get("/api/llm")
 def llm_status() -> dict:
     """Whether answer generation is available, the default model, all chat models and the provider
-    ("openai": LM Studio or another OpenAI-compatible server; "anthropic": the Claude API)."""
-    return state["llm"].status() | {"provider": config.LLM_PROVIDER}
+    ("openai": LM Studio or another OpenAI-compatible server; "anthropic": the Claude API); `translate`: whether
+    the Browse translation can run (it always uses the Claude API, so it needs the key)."""
+    return state["llm"].status() | {"provider": config.LLM_PROVIDER} | translate_status()
+
+
+def translate_status() -> dict:
+    """What the Browse translation can use: `translate` (the Claude key is set), its default model and the models it offers
+    (just the default when the list cannot be fetched)."""
+    ready = claude_key_set()
+    models: list[str] = []
+    if ready:
+        try:
+            models = [m["id"] for m in translator().list_models()]
+        except LLMError:
+            models = [config.TRANSLATE_MODEL]
+    return {"translate": ready, "translate_model": config.TRANSLATE_MODEL, "translate_models": models}
 
 
 @app.get("/api/products")
@@ -339,25 +355,64 @@ def pages() -> dict:
     return {"count": len(pages), "pages": pages}
 
 
-@app.get("/api/pages/{page_id}")
-def page(page_id: str = Path(..., pattern=r"^[0-9]{1,20}$")) -> dict:
-    """One article as the sync stored it (Markdown, without the title heading), for the Browse preview.
-
-    Read from the synced copy in `raw-data/`, not from Confluence: the server holds no Confluence token. `updated` is
-    the page's last change at the time of the sync. The id is digits only, so it cannot name another path."""
+def synced_page(page_id: str):
+    """One synced article, from `raw-data/` (the server holds no Confluence token). The id is digits only, so it
+    cannot name another path."""
     meta = next(iter(config.RAW_DIR.glob(f"*/pages/{page_id}.json")), None)
     if meta is None:
         raise HTTPException(404, f"No synced page {page_id}")
     try:
-        found = load_page(meta)
+        return load_page(meta)
     except (OSError, ValueError, KeyError) as exc:
         log.warning("Broken synced page %s: %s", meta, exc)
         raise HTTPException(500, f"The synced copy of page {page_id} is unreadable: run the sync again") from exc
+
+
+@app.get("/api/pages/{page_id}")
+def page(page_id: str = Path(..., pattern=r"^[0-9]{1,20}$")) -> dict:
+    """One article as the sync stored it (Markdown, without the title heading), for the Browse preview. `updated` is
+    the page's last change at the time of the sync."""
+    found = synced_page(page_id)
     return {
         "page_id": found.id, "title": found.title, "url": found.url, "breadcrumbs": found.breadcrumbs,
         "product": found.product, "updated": found.updated, "created": found.created, "labels": found.labels,
         "markdown": found.body,
     }
+
+
+def translator() -> ClaudeClient:
+    """The client that translates articles: always the Claude API (Haiku), whatever RAG_LLM_PROVIDER is."""
+    if "translator" not in state:
+        state["translator"] = ClaudeClient(model=config.TRANSLATE_MODEL, reasoning="none")
+    return state["translator"]
+
+
+@app.get("/api/pages/{page_id}/translate")
+def translate_page(
+    page_id: str = Path(..., pattern=r"^[0-9]{1,20}$"),
+    lang: str = Query(..., min_length=2, max_length=10, description="Language to translate into: es, de, pl or ru"),
+    model: str | None = Query(None, max_length=200, description="Claude model (default: RAG_TRANSLATE_MODEL)"),
+) -> StreamingResponse:
+    """The article translated by AI as NDJSON events: title?, delta*, done | error (the Browse preview shows them as
+    they come). Counts toward RAG_ANSWERS_PER_HOUR: every translation is billed by the Claude API."""
+    try:
+        code = check_target(lang)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    found = synced_page(page_id)
+    check_model(model, translator())
+    if not take_answer_slot():
+        raise HTTPException(429, f"Too many LLM requests: the limit is {config.ANSWERS_PER_HOUR} per hour (RAG_ANSWERS_PER_HOUR)")
+
+    def events() -> Iterator[str]:
+        try:
+            for event in stream_translation(found.title, found.body, translator(), code, model=model or config.TRANSLATE_MODEL):
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+        except Exception as exc:  # the headers are sent: report it in the stream instead of cutting it off
+            log.exception("Translation failed")
+            yield json.dumps({"type": "error", "message": f"Internal error: {exc}"}) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 # Mounted last so that /api/* routes take precedence.
