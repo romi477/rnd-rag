@@ -56,7 +56,7 @@ const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2
 // view: "search" or "browse" (the title filter of the article list is `filter`, kept apart from the query `q`).
 function newTab(init = {}) {
   return {id: newId(), mode: "docs", view: "search", q: "", filter: "", product: "", llm: false, model: "",
-          ...CODE_DEFAULTS, tracePanel: "closed", lang: "", translate: false, tlang: "", tmodel: "", data: null, answer: null, status: "", error: "", busy: false, ...init};
+          ...CODE_DEFAULTS, tracePanel: "closed", lang: "", translate: false, tlang: "", tmodel: "", opened: [], data: null, answer: null, status: "", error: "", busy: false, ...init};
 }
 
 const activeTab = () => tabs.find((t) => t.id === activeId);
@@ -137,6 +137,7 @@ function sanitize(t) {
   tab.tlang = tab.tlang.slice(0, 10);
   tab.tmodel = tab.tmodel.slice(0, 200);
   tab.translate = !!tab.translate;
+  tab.opened = Array.isArray(tab.opened) ? tab.opened.filter((n) => typeof n === "string").slice(0, 500) : [];
   if (tab.ran) tab.ran = {...SETTING_DEFAULTS, ...tab.ran}; // else the new settings would look "changed"
   return tab;
 }
@@ -508,6 +509,20 @@ function card(p, ts, open, rank) {
 // A page source has a title; a code source is named by where it is.
 const sourceTitle = (src) => src.title || `${src.module}/${src.path}:${src.line_start}-${src.line_end}`;
 
+// The article being rendered (set by renderArticle): its pictures are served by /api/pages/{id}/images/{name}.
+let articleId = "";
+const IS_URL = /^[a-z][a-z0-9+.-]*:\/\//i; // a picture from a URL is not hot-linked: it stays a label
+const unescapeHtml = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&amp;/g, "&");
+
+// A picture of the article; a URL, or a file the server does not have (the sync did not download it), stays a label,
+// and so does a picture that fails to load (see the error listener of the preview).
+function imageHtml(escaped) {
+  const name = unescapeHtml(escaped);
+  if (!articleId || IS_URL.test(name)) return `<span class="img-ph">image: ${escaped}</span>`;
+  const src = `/api/pages/${encodeURIComponent(articleId)}/images/${encodeURIComponent(name)}`;
+  return `<a class="article-img" href="${src}" target="_blank" rel="noopener" title="Open the picture"><img src="${src}" alt="${escaped}" loading="lazy"></a>`;
+}
+
 function inlineMd(text, sources, article = false) {
   // Code spans first, into placeholders: their content is literal (no *emphasis*, no [n] links).
   const codes = [];
@@ -518,7 +533,7 @@ function inlineMd(text, sources, article = false) {
     // "*.pdf and *.xml" stays as typed
     .replace(/(^|[\s(])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?=[\s.,;:!?)]|$)/g, "$1<em>$2</em>")
     // An article (the Browse preview): the sync leaves "[image: name.png]" where a picture was, and keeps its links.
-    .replace(/\[image: ([^\]\n]+)\]/g, (m, name) => article ? `<span class="img-ph">image: ${name}</span>` : m)
+    .replace(/\[image: ([^\]\n]+)\]/g, (m, name) => article ? imageHtml(name) : m)
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, label, url) =>
       article ? `<a href="${url}" target="_blank" rel="noopener">${label}</a>` : m)
     .replace(/&lt;(https?:\/\/[^\s&]+)&gt;/g, (m, url) => article ? `<a href="${url}" target="_blank" rel="noopener">${url}</a>` : m)
@@ -807,6 +822,10 @@ function groupPages(list, product, filter) {
   return {count, groups: [...groups.values()]};
 }
 
+const CHEVRON_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+const EXPAND_ALL_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg>';
+const COLLAPSE_ALL_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 20 5-5 5 5"/><path d="m7 4 5 5 5-5"/></svg>';
+
 const EYE_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
 
 const TRANSLATE_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
@@ -814,15 +833,19 @@ const TRANSLATE_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="no
 function renderBrowse(tab) {
   if (!pages) {
     $("browse-count").textContent = "";
+    $("fold-all").hidden = true;
     $("browse").innerHTML = pagesError ? "" : '<div class="empty">Loading the articles…</div>';
     return;
   }
   const {count, groups} = groupPages(pages, tab.product, tab.filter);
   const translate = translating(tab);
+  const filtering = !!tab.filter.trim(); // a title filter shows the groups it matched open: they would hide the matches
   $("browse-count").textContent = `${count} article${count === 1 ? "" : "s"}`;
-  $("browse").innerHTML = count ? groups.map((g) => `
-    <section class="group">
-      <h3 class="group-name">${escapeHtml(g.name)}</h3>
+  $("browse").innerHTML = count ? groups.map((g) => {
+    const open = filtering || tab.opened.includes(g.name);
+    return `
+    <section class="group${open ? "" : " folded"}">
+      <h3 class="group-name"><button type="button" class="group-toggle" data-group="${escapeHtml(g.name)}" aria-expanded="${open}" title="${open ? "Collapse" : "Expand"} the group">${CHEVRON_ICON}<span>${escapeHtml(g.name)}</span><span class="group-count">${g.items.length}</span></button></h3>
       <ul>${g.items.map(({p, title}) => {
         const href = safeUrl(p.url);
         const shown = p.created || p.updated; // the list is ordered by creation: show that date
@@ -834,7 +857,39 @@ function renderBrowse(tab) {
           ? `<a class="page-title" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="Open in Confluence">${title}</a>`
           : `<span class="page-title">${title}</span>`}${date ? `<span class="page-date" title="${escapeHtml(dates)}">${escapeHtml(date)}</span>` : ""}</li>`;
       }).join("")}</ul>
-    </section>`).join("") : '<div class="empty">No article title matches. Clear the filter or choose another product.</div>';
+    </section>`;
+  }).join("") : '<div class="empty">No article title matches. Clear the filter or choose another product.</div>';
+  syncFoldButton(tab);
+}
+
+// The button beside the article count: collapse every group, or expand them all (the groups shown now).
+function syncFoldButton(tab) {
+  const sections = [...document.querySelectorAll("#browse .group")];
+  const allOpen = sections.length > 0 && sections.every((s) => !s.classList.contains("folded"));
+  const filtering = !!tab.filter.trim();
+  const button = $("fold-all");
+  button.hidden = false;
+  button.disabled = filtering || !sections.length;
+  button.innerHTML = allOpen ? COLLAPSE_ALL_ICON : EXPAND_ALL_ICON;
+  const label = filtering ? "Groups stay open while the title filter is used" : allOpen ? "Collapse all groups" : "Expand all groups";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+}
+
+// Open or close one group, or (`open` null) all that are shown, without drawing the list again; the tab remembers which are open.
+function setGroups(tab, sections, open) {
+  for (const section of sections) {
+    const button = section.querySelector(".group-toggle");
+    const name = button.dataset.group;
+    const now = open ?? section.classList.contains("folded");
+    section.classList.toggle("folded", !now);
+    button.setAttribute("aria-expanded", String(now));
+    button.title = `${now ? "Collapse" : "Expand"} the group`;
+    tab.opened = tab.opened.filter((n) => n !== name);
+    if (now) tab.opened.push(name);
+  }
+  syncFoldButton(tab);
+  save();
 }
 
 // --- Browse preview: the article in a window over the blurred page ----------------------------------
@@ -843,6 +898,11 @@ const articles = new Map(); // page_id -> the article as /api/pages/{id} returne
 const translations = new Map(); // "page_id:lang" -> {title, text} of a finished AI translation: asked for once
 let previewController = null;
 let previewTrigger = null; // the Preview button that opened the window
+
+function renderArticle(markdown, pageId) {
+  articleId = pageId;
+  try { return renderMarkdown(markdown, [], true); } finally { articleId = ""; }
+}
 
 // `note` goes after the dates (the language of an AI translation).
 function showPreviewHead(meta, note = "") {
@@ -875,7 +935,7 @@ async function openPreview(id, lang = "", model = "") {
     if (lang) await showTranslation(article, lang, model, controller);
     else {
       showPreviewHead(article);
-      $("preview-body").innerHTML = renderMarkdown(article.markdown, [], true) || '<div class="empty">The article has no text.</div>';
+      $("preview-body").innerHTML = renderArticle(article.markdown, id) || '<div class="empty">The article has no text.</div>';
     }
   } catch (err) {
     if (controller.signal.aborted) return; // closed meanwhile
@@ -894,7 +954,7 @@ async function showTranslation(article, lang, model, controller) {
   const key = `${article.page_id}:${lang}:${model}`;
   const show = (title, text, truncated = false) => {
     showPreviewHead({...article, title: title || article.title}, note);
-    const html = renderMarkdown(text, [], true);
+    const html = renderArticle(text, article.page_id);
     $("preview-body").innerHTML = `<div class="article-text">${html}</div>` + (truncated
       ? '<div class="empty">The translation was cut off: it reached the token limit (RAG_TRANSLATE_MAX_TOKENS).</div>' : "");
   };
@@ -1379,7 +1439,18 @@ $("q").addEventListener("paste", (e) => {
   renderContent(tab);
   save();
 });
+$("fold-all").addEventListener("click", () => {
+  const tab = activeTab();
+  const sections = [...document.querySelectorAll("#browse .group")];
+  if (tab && sections.length) setGroups(tab, sections, sections.some((s) => s.classList.contains("folded")));
+});
 $("browse").addEventListener("click", (e) => {
+  const toggle = e.target.closest(".group-toggle");
+  if (toggle) {
+    const tab = activeTab();
+    if (tab && !tab.filter.trim()) setGroups(tab, [toggle.closest(".group")], null); // with a filter every group is open
+    return;
+  }
   const button = e.target.closest("[data-preview]");
   if (!button) return;
   previewTrigger = button; // focus goes back to it when the window closes (Safari does not focus a clicked button)
@@ -1391,6 +1462,15 @@ $("preview-body").addEventListener("click", (e) => {
   const retry = e.target.closest("[data-preview-retry]");
   if (retry) openPreview(retry.dataset.previewRetry, retry.dataset.lang, retry.dataset.model);
 });
+// A picture that did not load (not downloaded by the sync, removed in Confluence) falls back to its label.
+$("preview-body").addEventListener("error", (e) => {
+  const link = e.target.closest?.("a.article-img");
+  if (!link) return;
+  const label = document.createElement("span");
+  label.className = "img-ph";
+  label.textContent = `image: ${e.target.alt}`;
+  link.replaceWith(label);
+}, true); // error events do not bubble
 $("preview-close").addEventListener("click", () => $("preview").close());
 $("preview").addEventListener("click", (e) => { if (e.target === $("preview")) $("preview").close(); }); // the blurred backdrop
 $("preview").addEventListener("close", () => {

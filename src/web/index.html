@@ -77,7 +77,10 @@
       <label class="code-only" title="Search the code only in one module. A function named in the question is also looked up in the modules this one depends on; frames of the traceback are always looked up.">Module <select id="code-module"><option value="">All</option></select></label>
       <label class="code-only" title="Module version on the client's server: a different version from the indexed one is flagged, as line numbers may not match.">Client version <input id="client-version" type="text" size="10" maxlength="50" placeholder="19.0.2.3.0" autocomplete="off"></label>
       <label class="code-only" title="Also quote the Confluence pages that match the error message."><input type="checkbox" id="code-docs"> Add documentation</label>
-      <span id="browse-count" class="browse-only"></span>
+      <span class="browse-only fold-group">
+        <span id="browse-count"></span>
+        <button type="button" id="fold-all" class="icon-btn" aria-label="Expand all groups"></button>
+      </span>
       <!-- Browse: the Preview button of each article translates it with AI while this is on. -->
       <span class="llm-group browse-only">
         <label id="translate-label" title="Translate an article into another language with AI: the Preview button then shows the translation. The article text is sent to the Claude API."><input type="checkbox" id="translate"> AI translate</label>

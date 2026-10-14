@@ -171,6 +171,73 @@ def test_page_with_a_broken_synced_copy_is_a_500_with_a_hint(client, tmp_path, m
     assert res.status_code == 500 and "sync" in res.json()["detail"]
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20
+
+
+def write_attachments(raw_dir, page_id="123", files=None):
+    """Synced attachments as the sync leaves them: `<id>-<title>` files and `_index.json`."""
+    files = files or {"s.png": PNG}
+    att = raw_dir / "demo" / "attachments" / page_id
+    att.mkdir(parents=True, exist_ok=True)
+    index = {}
+    for i, (title, data) in enumerate(files.items()):
+        (att / f"{100 + i}-{title}").write_bytes(data)
+        index[str(100 + i)] = {"name": f"{100 + i}-{title}", "version": 1, "title": title}
+    (att / "_index.json").write_text(json.dumps(index))
+
+
+@pytest.fixture
+def with_images(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "raw")
+    write_synced_page(tmp_path / "raw")
+    write_attachments(tmp_path / "raw", files={"s.png": PNG, "photo.JPG": b"\xff\xd8\xff", "x.svg": b"<svg onload=alert(1)/>",
+                                                "doc.zip": b"PK", "my pic (1).png": PNG})
+    return client
+
+
+def test_an_image_of_the_page_is_served_with_its_type(with_images):
+    res = with_images.get("/api/pages/123/images/s.png")
+    assert res.status_code == 200 and res.content == PNG and res.headers["content-type"] == "image/png"
+    assert res.headers["x-content-type-options"] == "nosniff"
+    assert with_images.get("/api/pages/123/images/photo.JPG").headers["content-type"] == "image/jpeg"
+    assert with_images.get("/api/pages/123/images/my%20pic%20(1).png").status_code == 200
+
+
+def test_the_type_comes_from_the_file_not_its_name(with_images, tmp_path):
+    files = {"AD_4nXe-paste": PNG, "wide.bin": b"RIFF\x00\x00\x00\x00WEBPVP8 ", "anim": b"GIF89a" + b"0" * 10, "noext-zip": b"PK\x03\x04"}
+    write_attachments(tmp_path / "raw", files=files)
+    assert with_images.get("/api/pages/123/images/AD_4nXe-paste").headers["content-type"] == "image/png"
+    assert with_images.get("/api/pages/123/images/wide.bin").headers["content-type"] == "image/webp"
+    assert with_images.get("/api/pages/123/images/anim").headers["content-type"] == "image/gif"
+    assert with_images.get("/api/pages/123/images/noext-zip").status_code == 404
+
+
+def test_only_raster_images_are_served(with_images):
+    for name in ("x.svg", "doc.zip"):  # an SVG can carry a script, a zip is no picture
+        assert with_images.get(f"/api/pages/123/images/{name}").status_code == 404, name
+
+
+def test_an_unknown_image_or_page_is_404_and_a_name_cannot_name_a_path(with_images, tmp_path):
+    assert with_images.get("/api/pages/123/images/none.png").status_code == 404
+    assert with_images.get("/api/pages/999/images/s.png").status_code == 404
+    (tmp_path / "raw" / "demo" / "secret.png").write_bytes(PNG)
+    for bad in ("..%2fsecret.png", "..%2f..%2fsecret.png", "100-s.png", "_index.json", "%2e%2e"):
+        assert with_images.get(f"/api/pages/123/images/{bad}").status_code == 404, bad
+    assert with_images.get("/api/pages/12a/images/s.png").status_code == 422
+
+
+def test_an_index_entry_pointing_outside_the_folder_is_not_served(with_images, tmp_path):
+    (tmp_path / "raw" / "demo" / "secret.png").write_bytes(PNG)
+    index = tmp_path / "raw" / "demo" / "attachments" / "123" / "_index.json"
+    index.write_text(json.dumps({"1": {"name": "../../secret.png", "version": 1, "title": "evil.png"}}))
+    assert with_images.get("/api/pages/123/images/evil.png").status_code == 404
+
+
+def test_a_page_without_synced_images_or_with_a_broken_index_is_404(with_images, tmp_path):
+    (tmp_path / "raw" / "demo" / "attachments" / "123" / "_index.json").write_text("{not json")
+    assert with_images.get("/api/pages/123/images/s.png").status_code == 404
+
+
 class FakeTranslator(FakeLLM):
     """The Haiku client: records the request, answers with a title line and a text."""
 

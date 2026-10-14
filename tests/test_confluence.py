@@ -120,3 +120,53 @@ def test_pages_without_manifest_are_still_removed(server, tmp_path):
     server["pages"] = 3
     sync("sp", tmp_path)
     assert not (tmp_path / "sp" / "pages" / "4.md").exists()
+
+
+# --- images of the pages ---------------------------------------------------------------
+
+
+def test_referenced_images_are_the_attachments_shown_on_the_page():
+    html = ('<ac:image><ri:attachment ri:filename="a.png" /></ac:image><p>x</p>'
+            '<ac:image ac:alt="a"><ri:attachment ri:filename="a.png" /><ac:caption><p>c</p></ac:caption></ac:image>'
+            '<ac:image ac:src="https://x/y.jpg"><ri:url ri:value="https://x/y.jpg" /></ac:image>'
+            '<ac:link><ri:attachment ri:filename="doc.zip" /></ac:link>')
+    assert confluence.referenced_images(html) == {"a.png"}
+
+
+class FakeAttachments:
+    """The attachment calls of the Confluence client: a listing and files named by the attachment title."""
+
+    def __init__(self, titles):
+        self.titles, self.downloads = titles, []
+
+    def attachments(self, page_id):
+        return [{"id": str(100 + i), "title": t, "downloadLink": f"/download/{t}", "version": {"number": 1}}
+                for i, t in enumerate(self.titles)]
+
+    def download(self, url, dest):
+        self.downloads.append(url)
+        dest.write_bytes(b"data")
+
+
+def test_only_the_wanted_attachments_are_downloaded_once(tmp_path):
+    api = FakeAttachments(["a.png", "b.zip", "c.png"])
+    att = tmp_path / "att"
+    confluence.sync_attachments(api, "1", att, only={"a.png"})
+    assert sorted(p.name for p in att.iterdir()) == ["100-a.png", "_index.json"]
+    assert json.loads((att / "_index.json").read_text())["100"]["title"] == "a.png"
+    confluence.sync_attachments(api, "1", att, only={"a.png"})
+    assert api.downloads == ["/wiki/download/a.png"]  # the second run found it
+
+
+def test_an_attachment_the_page_no_longer_shows_is_removed(tmp_path):
+    api = FakeAttachments(["a.png", "c.png"])
+    att = tmp_path / "att"
+    confluence.sync_attachments(api, "1", att, only={"a.png", "c.png"})
+    confluence.sync_attachments(api, "1", att, only={"c.png"})
+    assert sorted(p.name for p in att.iterdir()) == ["101-c.png", "_index.json"]
+
+
+def test_without_a_filter_every_attachment_is_downloaded(tmp_path):
+    api = FakeAttachments(["a.png", "b.zip"])
+    confluence.sync_attachments(api, "1", tmp_path / "att")
+    assert len(api.downloads) == 2

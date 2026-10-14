@@ -329,6 +329,19 @@ button.secondary:hover { background: var(--surface); }
   letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
   background: var(--bg); border-bottom: 1px solid var(--border);
 }
+.group-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 0; font: inherit; letter-spacing: inherit; text-align: left;
+  text-transform: inherit; color: inherit; background: none; border: 0; border-radius: 4px; cursor: pointer;
+}
+.group-toggle:hover { color: var(--text); }
+.group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.group-toggle svg { flex: none; transition: transform .15s ease; }
+.group.folded .group-toggle svg { transform: rotate(-90deg); }
+.group-count { margin-left: auto; padding: 0 7px; font-weight: 500; letter-spacing: 0; line-height: 18px; background: var(--surface); border-radius: 9px; }
+.group.folded ul { display: none; }
+.fold-group { display: inline-flex; align-items: center; gap: 4px; }
+.fold-group .icon-btn { width: 24px; height: 24px; }
+.fold-group .icon-btn:disabled { opacity: .4; cursor: not-allowed; }
 .group ul { list-style: none; margin: 0; padding: 0; }
 .page { display: flex; align-items: center; gap: 10px; padding: 4px 8px; border-radius: 6px; }
 .preview-btn { flex: none; width: 26px; height: 26px; }
@@ -368,6 +381,8 @@ body:has(.preview[open]) { overflow: hidden; }
 .article blockquote { margin: 12px 0; padding: 2px 14px; border-left: 3px solid var(--border); color: var(--muted); }
 .article blockquote p { margin: 6px 0; }
 .article hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
+.article a.article-img { display: block; width: fit-content; max-width: 100%; margin: 12px 0; }
+.article .article-img img { display: block; max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
 .article .img-ph { display: inline-block; padding: 0 8px; font-size: 12.5px; color: var(--muted); background: var(--code-bg); border-radius: 999px; }
 .table-wrap { margin: 12px 0; overflow-x: auto; }
 .article table { border-collapse: collapse; font-size: 14px; }

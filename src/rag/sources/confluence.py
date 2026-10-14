@@ -5,7 +5,7 @@ Layout (per space):
         pages/<id>.storage.html   original storage-format body (lossless)
         pages/<id>.md             markdown with YAML frontmatter (for chunking)
         pages/<id>.json           page metadata (version, parent, breadcrumbs, url)
-        attachments/<id>/<attachment id>-<file>   page attachments (only with --attachments)
+        attachments/<id>/<attachment id>-<file>   the images a page shows (only with --attachments), `_index.json` maps titles to files
         _manifest.json            id -> {title, version, path}
 
 Incremental: a page is rewritten when its version or its breadcrumbs (a parent renamed or moved)
@@ -15,7 +15,7 @@ a quarter of the pages stops instead (an empty or partial listing), unless --for
 
 Usage (token falls back to $JIRA_TOKEN_VENT, defined in interactive zsh):
     zsh -ic 'uv run rag sync'                # sync space from .env
-    zsh -ic 'uv run rag sync --attachments'  # also download attachments
+    zsh -ic 'uv run rag sync --attachments'  # also download the images the pages show
     zsh -ic 'uv run rag sync --force'        # rewrite everything
 """
 
@@ -165,6 +165,12 @@ def _code(match: re.Match) -> str:
     body = CODE_BODY.search(inner)
     cls = f' class="language-{lang.group(1)}"' if lang else ""
     return f"<pre><code{cls}>{_escape(body.group(1)) if body else ''}</code></pre>"
+
+
+def referenced_images(storage: str) -> set[str]:
+    """File names of the attachments a page shows as images (`<ac:image>`); pictures from a URL are not attachments."""
+    names = (IMAGE_FILE.search(m.group(0)) for m in IMAGE.finditer(storage))
+    return {m.group(1) for m in names if m}
 
 
 def _image(match: re.Match) -> str:
@@ -333,7 +339,8 @@ def sync(space: str, out_root: Path, attachments: bool = False, force: bool = Fa
             written += 1
             print(f"  [{written}] {page['title']}")
         if attachments:
-            sync_attachments(api, pid, out / "attachments" / pid)
+            shown = referenced_images(page.get("body", {}).get("storage", {}).get("value", ""))
+            sync_attachments(api, pid, out / "attachments" / pid, only=shown)
 
     for pid in removed:
         for suffix in (".storage.html", ".json", ".md"):
@@ -362,19 +369,20 @@ def reconvert(space: str, out_root: Path) -> int:
     return n
 
 
-def sync_attachments(api: Confluence, page_id: str, att_dir: Path) -> None:
-    """Download new or changed attachments of a page; files are named `<attachment id>-<title>`
-    so that titles that clash after sanitizing don't overwrite each other."""
+def sync_attachments(api: Confluence, page_id: str, att_dir: Path, only: set[str] | None = None) -> None:
+    """Download new or changed attachments of a page (only those titled in `only`, when given); files are named
+    `<attachment id>-<title>` so that titles that clash after sanitizing don't overwrite each other. `_index.json`
+    maps the attachment id to the file, its version and its title (the API finds a picture by the title)."""
     index_path = att_dir / "_index.json"
     index = json.loads(index_path.read_text()) if index_path.exists() else {}
     current = {}
     for att in api.attachments(page_id):
         link = att.get("downloadLink")
-        if not link:
+        if not link or (only is not None and att["title"] not in only):
             continue
         aid, version = att["id"], att.get("version", {}).get("number")
         name = safe_name(f"{aid}-{att['title']}")
-        current[aid] = {"name": name, "version": version}
+        current[aid] = {"name": name, "version": version, "title": att["title"]}
         if index.get(aid) == current[aid] and (att_dir / name).exists():
             continue
         att_dir.mkdir(parents=True, exist_ok=True)

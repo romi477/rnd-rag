@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException, Path, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -378,6 +378,45 @@ def page(page_id: str = Path(..., pattern=r"^[0-9]{1,20}$")) -> dict:
         "product": found.product, "updated": found.updated, "created": found.created, "labels": found.labels,
         "markdown": found.body,
     }
+
+
+def image_type(path) -> str | None:
+    """The media type of a raster picture, from the first bytes of the file (some pasted pictures have no extension in
+    their title). None for anything else: an SVG can carry a script, other attachments are not pictures."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+    except OSError:
+        return None
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+@app.get("/api/pages/{page_id}/images/{name}")
+def page_image(page_id: str = Path(..., pattern=r"^[0-9]{1,20}$"), name: str = Path(..., max_length=300)) -> FileResponse:
+    """A picture of an article, by the file name the page shows (`[image: name.png]` in its Markdown): the copy the sync
+    downloaded with `--attachments`. The name is looked up in the page's `_index.json`; it never builds a path, and a file
+    outside the page's folder is not served."""
+    for index_path in config.RAW_DIR.glob(f"*/attachments/{page_id}/_index.json"):
+        try:
+            entries = list(json.loads(index_path.read_text()).values())
+        except (OSError, ValueError, AttributeError):
+            continue
+        folder = index_path.parent.resolve()
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("title") == name and isinstance(entry.get("name"), str):
+                path = (folder / entry["name"]).resolve()
+                media = image_type(path) if path.parent == folder and path.is_file() else None
+                if media:
+                    return FileResponse(path, media_type=media, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-cache"})
+    raise HTTPException(404, f"No synced image {name!r} for page {page_id}")
 
 
 def translator() -> ClaudeClient:

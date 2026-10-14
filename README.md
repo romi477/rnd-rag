@@ -53,9 +53,13 @@ The Search / Browse switch in the header belongs to the tab: Browse lists every 
 (`/api/pages`) grouped by product and section, newest first inside a group (by the date the page
 was created in Confluence, which the list shows; the tooltip adds the last update), narrowed by the product filter and by the words typed
 in the title filter; each view keeps its own text, and `?view=browse&filter=...` opens it directly.
+The groups open folded: click a group's heading (it shows how many articles it holds) to open it, or use the small button beside
+the article count to open or fold them all; the open groups are remembered per tab, and while a title filter is typed the groups it
+matched stay open.
 The eye button at the start of a row opens a preview: the article is fetched from the server when pressed (`/api/pages/{id}`)
-and shown in a window over the blurred page, with its headings, lists, tables, quotes and links; pictures show as
-placeholders. Esc, the cross or a click outside closes it; "Open in Confluence" goes to the original.
+and shown in a window over the blurred page, with its headings, lists, tables, quotes, links and pictures (a picture opens full size on a
+click). Pictures come from `scripts/sync.sh --attachments`, which downloads the images each page shows (not its other attachments;
+`/api/pages/{id}/images/{name}` serves them, PNG / JPEG / GIF / WebP only, judged by the file's content); one that was not downloaded, or is a URL, stays a label. Esc, the cross or a click outside closes it; "Open in Confluence" goes to the original.
 The "AI translate" checkbox (Browse only, with a language select: Spanish, German, Polish, Russian; the articles are English) turns
 the eye button into a translate button: the article is translated by the Claude API (Haiku, `RAG_TRANSLATE_MODEL`, whatever
 `RAG_LLM_PROVIDER` is) and the translation streams into the same window, marked "AI translation". Menu paths, settings, code and
@@ -104,7 +108,7 @@ scripts/serve.sh      # web UI at http://127.0.0.1:8000
 |---|---|
 | `setup.sh` | `uv sync`; creates `.env` from `.env.example` if missing |
 | `update.sh [--force]` | `sync.sh` + `index.sh`; run it when docs change in Confluence |
-| `sync.sh [--force] [--attachments]` | download new/changed pages into `raw-data/`; `--reconvert` rebuilds the markdown offline |
+| `sync.sh [--force] [--attachments]` | download new/changed pages into `raw-data/` (`--attachments`: also the images they show, for the Browse preview); `--reconvert` rebuilds the markdown offline |
 | `index.sh [--force] [--model M]` | chunk + embed changed pages into `data/lancedb/` |
 | `serve.sh [port] [--offline]` | web UI + JSON API (`RAG_HOST` / `RAG_PORT` env vars also work); `--offline` skips the Hugging Face update check |
 | `search.sh "query" [--text]` | search from the terminal |
